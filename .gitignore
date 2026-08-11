@@ -1,0 +1,39 @@
+# Local credentials and runtime configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+credentials*.json
+secrets*.json
+config.local.json
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node.js artifacts
+node_modules/
+dist/
+coverage/
+
+# Local agent/runtime state
+.omx/
+.codebase-memory/
+
+# Generated machine-specific service snapshots
+/systemd/
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/
+*.log
+*.swp
+*~

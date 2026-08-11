@@ -1,0 +1,22 @@
+{
+  "name": "codex-telegram-plugin",
+  "version": "0.1.0",
+  "description": "Control Codex sessions, answer questions, and approve actions through either a shared OpenCode Telegram bot or a standalone Telegram receiver.",
+  "author": {
+    "name": "Codex Telegram Contributors"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Telegram",
+    "shortDescription": "Codex remote control through shared or standalone Telegram",
+    "longDescription": "Adds Telegram question, approval, completion, status, and session-resume support. Installations can reuse an existing OpenCode bot without copying its token or run an independent single-poller receiver.",
+    "developerName": "Codex Telegram Contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": "Use the Codex Telegram integration for questions and approvals while you work."
+  },
+  "mcpServers": "./.mcp.json"
+}

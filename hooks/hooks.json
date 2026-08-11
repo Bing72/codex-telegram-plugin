@@ -1,0 +1,64 @@
+{
+  "description": "Telegram bridge lifecycle hooks for Codex.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" session-start",
+            "timeout": 15,
+            "statusMessage": "Registering Codex session with Telegram",
+            "additionalContextLimit": 600
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" user-prompt",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" permission-request",
+            "timeout": 600,
+            "statusMessage": "Waiting for Telegram approval"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" stop",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" session-end",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

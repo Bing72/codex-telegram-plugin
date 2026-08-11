@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "codex-telegram": {
+      "command": "codex-telegram-mcp"
+    }
+  }
+}
