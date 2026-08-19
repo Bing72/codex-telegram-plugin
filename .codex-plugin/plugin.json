@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-plugin",
-  "version": "0.1.0",
+  "version": "0.1.0+codex.20260819124612",
   "description": "Control Codex sessions, answer questions, and approve actions through either a shared OpenCode Telegram bot or a standalone Telegram receiver.",
   "author": {
     "name": "Codex Telegram Contributors"

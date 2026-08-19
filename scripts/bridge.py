@@ -34,6 +34,7 @@ from common import (  # noqa: E402
     register_session,
     request_permission,
     send_codex_notification,
+    session_emoji,
 )
 
 
@@ -658,7 +659,7 @@ class CodexBridge:
             title = _thread_title(thread or {"id": thread_id})
             send_codex_notification(
                 message,
-                title=f"Codex 완료 · {title}",
+                title=f"{session_emoji(thread_id)} ✅ Codex 완료 · {title}",
                 config=self.config,
             )
         except (TelegramBridgeError, RpcError) as exc:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from common import (  # noqa: E402
     request_permission,
     resolve_session_name,
     send_codex_notification,
+    session_emoji,
     session_title,
     summarize_tool_input,
 )
@@ -36,6 +38,120 @@ def completion_session_name(session_id: str, cwd: str) -> str:
         fallback=fallback,
         server_url=bridge_url(),
     )
+
+
+def _agent_message_text(item: dict[str, Any]) -> str:
+    direct = item.get("text")
+    if isinstance(direct, str):
+        return direct.strip()
+    parts: list[str] = []
+    for content in item.get("content") or []:
+        if not isinstance(content, dict):
+            continue
+        content_type = str(content.get("type") or "").lower()
+        text = content.get("text")
+        if content_type in {"text", "output_text"} and isinstance(text, str):
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def progress_event(
+    value: Any,
+    *,
+    turn_id: str,
+) -> tuple[str | None, str | None, bool]:
+    """Return (item id, commentary text, turn complete) for one rollout event."""
+
+    if not isinstance(value, dict) or value.get("type") != "event_msg":
+        return None, None, False
+    payload = value.get("payload")
+    if not isinstance(payload, dict):
+        return None, None, False
+    event_type = payload.get("type")
+    event_turn_id = payload.get("turn_id")
+    if event_type == "turn_aborted" and event_turn_id in {None, turn_id}:
+        return None, None, True
+    if event_turn_id != turn_id:
+        return None, None, False
+    if event_type in {"task_complete", "turn_complete", "turn_completed"}:
+        return None, None, True
+    if event_type != "item_completed":
+        return None, None, False
+    item = payload.get("item")
+    if not isinstance(item, dict) or item.get("type") != "AgentMessage":
+        return None, None, False
+    phase = item.get("phase")
+    if phase == "final_answer":
+        return None, None, True
+    if phase != "commentary":
+        return None, None, False
+    text = _agent_message_text(item)
+    if not text:
+        return None, None, False
+    item_id = item.get("id")
+    return str(item_id or text), text, False
+
+
+def watch_progress(
+    data: dict[str, Any],
+    *,
+    poll_interval: float = 0.2,
+    file_wait_seconds: float = 5.0,
+) -> None:
+    """Tail one active turn and mirror completed commentary messages to Telegram."""
+
+    session_id = str(data.get("session_id") or "")
+    turn_id = str(data.get("turn_id") or "")
+    transcript = data.get("transcript_path")
+    cwd = str(data.get("cwd") or os.getcwd())
+    if (
+        data.get("agent_id")
+        or not session_id
+        or not turn_id
+        or not isinstance(transcript, str)
+        or not transcript
+    ):
+        return
+    path = Path(transcript).expanduser()
+    deadline = time.monotonic() + max(file_wait_seconds, 0)
+    while not path.is_file():
+        if time.monotonic() >= deadline:
+            return
+        time.sleep(poll_interval)
+
+    title = (
+        f"{session_emoji(session_id)} Codex 진행 · "
+        f"{completion_session_name(session_id, cwd)}"
+    )
+    sent_items: set[str] = set()
+    pending = ""
+    with path.open("r", encoding="utf-8") as stream:
+        while True:
+            chunk = stream.read(65536)
+            if not chunk:
+                time.sleep(poll_interval)
+                continue
+            pending += chunk
+            lines = pending.split("\n")
+            pending = lines.pop()
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                item_id, message, completed = progress_event(value, turn_id=turn_id)
+                if completed:
+                    return
+                if item_id is None or message is None or item_id in sent_items:
+                    continue
+                sent_items.add(item_id)
+                try:
+                    send_codex_notification(message, title=title, silent=True)
+                except TelegramBridgeError:
+                    # Progress delivery is best-effort and must never block the turn.
+                    continue
 
 
 def read_input() -> dict[str, Any]:
@@ -173,7 +289,10 @@ def handle_stop(data: dict[str, Any]) -> None:
         try:
             send_codex_notification(
                 message,
-                title=f"Codex 완료 · {completion_session_name(session_id, cwd)}",
+                title=(
+                    f"{session_emoji(session_id)} ✅ Codex 완료 · "
+                    f"{completion_session_name(session_id, cwd)}"
+                ),
             )
         except TelegramBridgeError:
             pass
@@ -204,6 +323,9 @@ def main() -> int:
             handle_stop(data)
         elif mode == "session-end":
             handle_session_end(data)
+        elif mode == "progress":
+            watch_progress(data)
+            emit({})
         else:
             emit({})
     except Exception:

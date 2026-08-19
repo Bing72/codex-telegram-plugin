@@ -43,6 +43,40 @@ QUESTION_TIMEOUT_SECONDS = 24 * 60 * 60
 PERMISSION_TIMEOUT_SECONDS = 570
 TERMINAL_EVENT_LIMIT = 6000
 REDACTION_MARKER = "[REDACTED]"
+SESSION_EMOJIS = (
+    "🐙",
+    "🦊",
+    "🐼",
+    "🐸",
+    "🦁",
+    "🐯",
+    "🐨",
+    "🐧",
+    "🦄",
+    "🐳",
+    "🦋",
+    "🐝",
+    "🦉",
+    "🦖",
+    "🌵",
+    "🍀",
+    "🌙",
+    "⭐",
+    "🔥",
+    "💧",
+    "🍎",
+    "🍋",
+    "🍇",
+    "🍉",
+    "🚀",
+    "🎯",
+    "🎈",
+    "🎲",
+    "🧩",
+    "🎨",
+    "🎵",
+    "💎",
+)
 
 _SECRET_ENV_KEY_RE = re.compile(
     r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|"
@@ -497,6 +531,7 @@ def send_message(
     *,
     reply_markup: dict[str, Any] | None = None,
     parse_mode: str | None = None,
+    silent: bool = False,
 ) -> int:
     secrets_to_mask = (config.bot_token,)
     payload: dict[str, Any] = {
@@ -510,6 +545,8 @@ def send_message(
         )
     if parse_mode is not None:
         payload["parse_mode"] = parse_mode
+    if silent:
+        payload["disable_notification"] = True
     result = _telegram_api(config, "sendMessage", payload)
     if not isinstance(result, dict):
         raise TelegramBridgeError("Telegram sendMessage response is not an object")
@@ -544,6 +581,7 @@ def send_codex_notification(
     *,
     title: str = "Codex",
     config: TelegramConfig | None = None,
+    silent: bool = False,
 ) -> int:
     cfg = config or load_telegram_config()
     clipped = text.strip()
@@ -551,7 +589,12 @@ def send_codex_notification(
         clipped = clipped[:3499] + "…"
     safe_title = html.escape(title, quote=False)
     safe_body = html.escape(clipped or "(내용 없음)", quote=False)
-    return send_message(cfg, f"<b>{safe_title}</b>\n\n{safe_body}", parse_mode="HTML")
+    return send_message(
+        cfg,
+        f"<b>{safe_title}</b>\n\n{safe_body}",
+        parse_mode="HTML",
+        silent=silent,
+    )
 
 
 def _short_hash(source: str) -> str:
@@ -698,9 +741,13 @@ def ask_questions(
     config: TelegramConfig | None = None,
     request_id: str | None = None,
     session_name: str | None = None,
-) -> list[list[str]]:
+    cancel_event: threading.Event | None = None,
+    cancel_message: str = "✅ Codex에서 답변을 받았습니다.",
+) -> list[list[str]] | None:
     cfg = config or load_telegram_config()
     normalized = normalize_questions(questions)
+    if cancel_event is not None and cancel_event.is_set():
+        return None
     request_id = request_id or f"codex-question-{secrets.token_urlsafe(12)}"
     owner_id = f"codex-{os.getpid()}-{secrets.token_hex(6)}"
     short_hash = question_short_hash(request_id, session_id, server_url)
@@ -748,6 +795,22 @@ def ask_questions(
     deadline = time.monotonic() + timeout_seconds
     try:
         while time.monotonic() < deadline:
+            if cancel_event is not None and cancel_event.is_set():
+                try:
+                    edit_message(
+                        cfg,
+                        message_id,
+                        f"🧵 세션: {display_session_name}\n\n{cancel_message}",
+                    )
+                except TelegramBridgeError:
+                    pass
+                mirror_terminal_event(
+                    "질문",
+                    short_hash,
+                    "다른 채널의 답변이 먼저 도착했습니다.",
+                    state="다른 채널 응답 완료",
+                )
+                return None
             current = read_pending_json(path)
             if isinstance(current, dict) and isinstance(current.get("submittedAt"), int):
                 answers = current.get("answersInProgress")
@@ -1029,6 +1092,17 @@ def register_session(
 def session_title(cwd: str, session_id: str) -> str:
     name = Path(cwd).name or cwd or "Codex"
     return f"Codex · {name} · {session_id[:8]}"
+
+
+def session_emoji(session_id: str) -> str:
+    """Return a random-looking marker that stays stable for one session."""
+
+    normalized = str(session_id).strip()
+    if not normalized:
+        return "💬"
+    digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    index = int.from_bytes(digest[:2], "big") % len(SESSION_EMOJIS)
+    return SESSION_EMOJIS[index]
 
 
 def permission_fingerprint(tool_name: str, tool_input: Any) -> str:

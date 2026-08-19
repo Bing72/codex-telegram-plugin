@@ -24,9 +24,10 @@ ask.
 
 ## Features
 
-- Completion notifications through Codex lifecycle hooks
+- Mid-turn progress and completion notifications through Codex lifecycle hooks
+- Stable randomized emoji markers that distinguish concurrent Codex sessions
 - Telegram approval buttons for Codex permission requests
-- Bundled MCP `ask_user` tool for option and custom-text questions
+- Bundled MCP `ask_user` tool that mirrors option and custom-text questions to Telegram and supported Codex clients
 - Session titles and question state mirrored into the active Codex session
 - `/sessions`, `/status N`, and `/start_work N` session control
 - Loopback-only session bridge backed by `codex app-server --stdio`
@@ -51,13 +52,22 @@ token at a time.
 ## Question and approval routing
 
 While the user is active in the Codex session, agents should prefer Codex's
-native question UI or one concise in-session question. `ask_user` is the remote
-fallback; after it is invoked, Telegram is the authoritative response channel
-for that call.
+native question UI or one concise in-session question. When `ask_user` is
+invoked, clients that negotiate MCP form elicitation receive the same question
+and Telegram receives inline buttons. The first completed answer wins; the
+other channel is closed or cancelled. Clients without elicitation support keep
+the existing Telegram-only fallback.
 
 Telegram is also the response channel for plugin-managed approval prompts. If a
 Telegram approval fails or times out, the hook returns no decision and Codex
 falls back to its native approval flow.
+
+For ordinary local Codex sessions, completed assistant commentary messages are
+mirrored silently to Telegram while the turn continues. Final answers keep using
+the existing normal notification with a visible `✅` completion marker, so
+progress and completion are not duplicated or confused.
+Each session keeps one randomized emoji marker across both notification types,
+making interleaved messages from concurrent sessions easier to distinguish.
 
 ## Security and local data
 

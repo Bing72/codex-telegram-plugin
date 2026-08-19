@@ -25,6 +25,17 @@ def make_config(label: str) -> common.TelegramConfig:
 
 
 class CommonTests(unittest.TestCase):
+    def test_session_emoji_is_stable_and_distinguishes_sessions(self) -> None:
+        marker = common.session_emoji("thread-stable")
+
+        self.assertEqual(common.session_emoji("thread-stable"), marker)
+        self.assertIn(marker, common.SESSION_EMOJIS)
+        self.assertGreater(
+            len({common.session_emoji(f"thread-{index}") for index in range(16)}),
+            1,
+        )
+        self.assertEqual(common.session_emoji(""), "💬")
+
     def test_sensitive_text_redaction_masks_common_credentials(self) -> None:
         bot_token = "123456789:" + ("A" * 28)
         api_secret = "super-" + "secret-value"
@@ -100,6 +111,41 @@ class CommonTests(unittest.TestCase):
             f"keep:{secret}",
         )
         self.assertNotIn(secret, edit_payload["text"])
+
+    def test_codex_notification_can_disable_notification_sound(self) -> None:
+        config = make_config("silent-message")
+        with mock.patch.object(
+            common,
+            "_telegram_api",
+            return_value={"message_id": 9},
+        ) as telegram_api:
+            message_id = common.send_codex_notification(
+                "진행 중",
+                title="🦊 Codex 진행 · 작업 세션",
+                config=config,
+                silent=True,
+            )
+
+        self.assertEqual(message_id, 9)
+        payload = telegram_api.call_args.args[2]
+        self.assertIs(payload["disable_notification"], True)
+        self.assertEqual(payload["parse_mode"], "HTML")
+
+    def test_codex_notification_keeps_normal_sound_by_default(self) -> None:
+        config = make_config("normal-message")
+        with mock.patch.object(
+            common,
+            "_telegram_api",
+            return_value={"message_id": 10},
+        ) as telegram_api:
+            common.send_codex_notification(
+                "완료",
+                title="🦊 ✅ Codex 완료 · 작업 세션",
+                config=config,
+            )
+
+        payload = telegram_api.call_args.args[2]
+        self.assertNotIn("disable_notification", payload)
 
     def test_terminal_mirror_writes_safe_correlated_event(self) -> None:
         stream = io.StringIO()
@@ -272,6 +318,45 @@ class CommonTests(unittest.TestCase):
             config,
             12,
             "🧵 세션: 만료 테스트\n\n⌛ Codex 질문이 만료됐습니다.",
+        )
+        self.assertEqual(list(pending_dir.glob("*.json")), [])
+        pending_dir.rmdir()
+
+    def test_question_cancellation_closes_telegram_when_codex_answers_first(self) -> None:
+        config = make_config("question-cancel")
+        pending_dir = common.pending_question_dir(config)
+        cancelled = threading.Event()
+
+        def send_then_cancel(*_args: object, **_kwargs: object) -> int:
+            cancelled.set()
+            return 13
+
+        with (
+            mock.patch.object(common, "send_message", side_effect=send_then_cancel),
+            mock.patch.object(common, "edit_message") as edit,
+            mock.patch.object(common, "mirror_terminal_event"),
+        ):
+            answers = common.ask_questions(
+                [
+                    {
+                        "header": "확인",
+                        "question": "진행할까요?",
+                        "options": [{"label": "예", "description": ""}],
+                    }
+                ],
+                session_id="thread-cancel",
+                server_url="http://127.0.0.1:43991/",
+                timeout_seconds=5,
+                config=config,
+                session_name="동기화 테스트",
+                cancel_event=cancelled,
+            )
+
+        self.assertIsNone(answers)
+        edit.assert_called_once_with(
+            config,
+            13,
+            "🧵 세션: 동기화 테스트\n\n✅ Codex에서 답변을 받았습니다.",
         )
         self.assertEqual(list(pending_dir.glob("*.json")), [])
         pending_dir.rmdir()

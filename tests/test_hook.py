@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -78,6 +80,174 @@ class HookOutputTests(unittest.TestCase):
             output["systemMessage"],
             "Telegram에서 허용했습니다.",
         )
+
+    def test_progress_event_extracts_only_matching_commentary(self) -> None:
+        event = {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "message-1",
+                    "phase": "commentary",
+                    "content": [{"type": "Text", "text": "분석을 마쳤습니다."}],
+                },
+            },
+        }
+
+        self.assertEqual(
+            hook.progress_event(event, turn_id="turn-1"),
+            ("message-1", "분석을 마쳤습니다.", False),
+        )
+        self.assertEqual(
+            hook.progress_event(event, turn_id="turn-2"),
+            (None, None, False),
+        )
+
+    def test_progress_event_stops_without_forwarding_final_answer(self) -> None:
+        event = {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "message-final",
+                    "phase": "final_answer",
+                    "content": [{"type": "Text", "text": "완료했습니다."}],
+                },
+            },
+        }
+
+        self.assertEqual(
+            hook.progress_event(event, turn_id="turn-1"),
+            (None, None, True),
+        )
+
+    def test_progress_event_stops_when_turn_is_aborted(self) -> None:
+        event = {
+            "type": "event_msg",
+            "payload": {
+                "type": "turn_aborted",
+                "turn_id": "turn-1",
+                "reason": "interrupted",
+            },
+        }
+
+        self.assertEqual(
+            hook.progress_event(event, turn_id="turn-1"),
+            (None, None, True),
+        )
+
+    def test_progress_watcher_sends_commentary_once_and_exits_on_final(self) -> None:
+        commentary = {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "message-1",
+                    "phase": "commentary",
+                    "content": [{"type": "Text", "text": "테스트를 시작합니다."}],
+                },
+            },
+        }
+        final = {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "turn_id": "turn-1",
+                "item": {
+                    "type": "AgentMessage",
+                    "id": "message-final",
+                    "phase": "final_answer",
+                    "content": [{"type": "Text", "text": "완료했습니다."}],
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            transcript = Path(directory) / "rollout.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    [
+                        json.dumps(commentary, ensure_ascii=False),
+                        json.dumps(commentary, ensure_ascii=False),
+                        json.dumps(final, ensure_ascii=False),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with (
+                mock.patch.object(hook, "completion_session_name", return_value="작업 세션"),
+                mock.patch.object(hook, "session_emoji", return_value="🦊"),
+                mock.patch.object(hook, "send_codex_notification") as send,
+            ):
+                hook.watch_progress(
+                    {
+                        "session_id": "session-1",
+                        "turn_id": "turn-1",
+                        "transcript_path": str(transcript),
+                        "cwd": directory,
+                    },
+                    poll_interval=0,
+                )
+
+        send.assert_called_once_with(
+            "테스트를 시작합니다.",
+            title="🦊 Codex 진행 · 작업 세션",
+            silent=True,
+        )
+
+    def test_completion_uses_the_same_session_emoji(self) -> None:
+        with (
+            mock.patch.object(hook, "register_session"),
+            mock.patch.object(hook, "completion_session_name", return_value="작업 세션"),
+            mock.patch.object(hook, "session_emoji", return_value="🦊") as emoji,
+            mock.patch.object(hook, "send_codex_notification") as send,
+            mock.patch.object(hook, "emit"),
+        ):
+            hook.handle_stop(
+                {
+                    "session_id": "session-1",
+                    "cwd": "/workspace/project",
+                    "last_assistant_message": "완료했습니다.",
+                }
+            )
+
+        emoji.assert_called_once_with("session-1")
+        send.assert_called_once_with(
+            "완료했습니다.",
+            title="🦊 ✅ Codex 완료 · 작업 세션",
+        )
+
+    def test_progress_watcher_ignores_subagent_turns(self) -> None:
+        with mock.patch.object(hook, "send_codex_notification") as send:
+            hook.watch_progress(
+                {
+                    "session_id": "session-1",
+                    "turn_id": "turn-1",
+                    "agent_id": "agent-1",
+                    "transcript_path": "/does/not/matter",
+                    "cwd": "/tmp",
+                },
+                poll_interval=0,
+                file_wait_seconds=0,
+            )
+
+        send.assert_not_called()
+
+    def test_user_prompt_hook_starts_async_progress_watcher(self) -> None:
+        config = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+        handlers = config["hooks"]["UserPromptSubmit"][0]["hooks"]
+        progress = next(
+            handler for handler in handlers if handler["command"].endswith('hook.py\" progress')
+        )
+
+        self.assertIs(progress["async"], True)
+        self.assertEqual(progress["timeout"], 86400)
 
 
 if __name__ == "__main__":

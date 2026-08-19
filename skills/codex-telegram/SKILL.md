@@ -21,16 +21,18 @@ description: Use the installed Telegram bridge when Codex needs a real user answ
 5. `/sessions`, `/status N`, and `/start_work N` are served by the configured
    receiver: an external Telegram receiver in shared mode or the bundled
    poller in standalone mode.
-6. `ask_user` publishes its pending question through MCP progress so the
-   current Codex session can render it, and also mirrors it to the controlling
-   TTY when one exists. Telegram remains the authoritative response channel for
-   an `ask_user` call. Permission decisions keep their existing single-channel
-   safety rule because a deciding `PermissionRequest` hook suppresses Codex's
-   separate native approval prompt.
+6. `ask_user` publishes its pending question through MCP progress and, when
+   the client negotiates MCP form elicitation, shows the same selectable form
+   in Codex and Telegram. The first completed answer is authoritative and the
+   other channel is cancelled. Clients without elicitation support retain the
+   Telegram-only fallback. Permission decisions keep their existing
+   single-channel safety rule because a deciding `PermissionRequest` hook
+   suppresses Codex's separate native approval prompt.
 
 ## Success criteria
 
-- The user answer returned by `ask_user` is used as authoritative input.
+- The first valid Telegram or Codex elicitation answer returned by `ask_user`
+  is used as authoritative input.
 - A denied permission remains denied.
 - The current Codex session shows the `ask_user` question through MCP progress
   when the client supplies a progress token; a controlling TTY remains a

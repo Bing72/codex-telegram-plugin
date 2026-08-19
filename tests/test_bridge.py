@@ -113,6 +113,27 @@ class BridgeMappingTests(unittest.TestCase):
         self.assertEqual(result, {"answers": {"confirm": {"answers": ["예"]}}})
         self.assertEqual(ask.call_args.kwargs["session_name"], "Cached session title")
 
+    def test_completion_notification_uses_session_emoji(self) -> None:
+        config = mock.Mock()
+        with mock.patch.object(bridge, "load_telegram_config", return_value=config):
+            service = bridge.CodexBridge()
+        service.get_thread = mock.Mock(
+            return_value={"id": "thread-1", "name": "작업 세션"}
+        )
+
+        with (
+            mock.patch.object(bridge, "session_emoji", return_value="🐼") as emoji,
+            mock.patch.object(bridge, "send_codex_notification") as send,
+        ):
+            service._notify_completion("thread-1", "완료했습니다.")
+
+        emoji.assert_called_once_with("thread-1")
+        send.assert_called_once_with(
+            "완료했습니다.",
+            title="🐼 ✅ Codex 완료 · 작업 세션",
+            config=config,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
