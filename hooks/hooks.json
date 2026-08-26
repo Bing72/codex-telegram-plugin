@@ -22,12 +22,6 @@
             "type": "command",
             "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" user-prompt",
             "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" progress",
-            "timeout": 86400,
-            "async": true
           }
         ]
       }
@@ -40,6 +34,17 @@
             "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" permission-request",
             "timeout": 600,
             "statusMessage": "Waiting for Telegram approval"
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/python3 \"${PLUGIN_ROOT}/scripts/hook.py\" interrupt",
+            "timeout": 3
           }
         ]
       }

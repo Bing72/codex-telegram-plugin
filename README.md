@@ -24,7 +24,7 @@ ask.
 
 ## Features
 
-- Mid-turn progress and completion notifications through Codex lifecycle hooks
+- Final-answer completion and interruption notifications through Codex lifecycle hooks
 - Stable randomized emoji markers that distinguish concurrent Codex sessions
 - Telegram approval buttons for Codex permission requests
 - Bundled MCP `ask_user` tool that mirrors option and custom-text questions to Telegram and supported Codex clients
@@ -62,12 +62,11 @@ Telegram is also the response channel for plugin-managed approval prompts. If a
 Telegram approval fails or times out, the hook returns no decision and Codex
 falls back to its native approval flow.
 
-For ordinary local Codex sessions, completed assistant commentary messages are
-mirrored silently to Telegram while the turn continues. Final answers keep using
-the existing normal notification with a visible `✅` completion marker, so
-progress and completion are not duplicated or confused.
-Each session keeps one randomized emoji marker across both notification types,
-making interleaved messages from concurrent sessions easier to distinguish.
+For ordinary local Codex sessions, only final answers are sent to Telegram with
+a visible `✅` completion marker. When Codex 0.150.0 or later interrupts an
+active top-level turn, the `Interrupt` hook sends a visible `🚨` Telegram alert
+instead. Each session keeps one randomized emoji marker across both notification
+types, making interleaved messages from concurrent sessions easier to distinguish.
 
 ## Security and local data
 
