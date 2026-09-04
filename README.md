@@ -67,6 +67,9 @@ a visible `✅` completion marker. When Codex 0.150.0 or later interrupts an
 active top-level turn, the `Interrupt` hook sends a visible `🚨` Telegram alert
 instead. Each session keeps one randomized emoji marker across both notification
 types, making interleaved messages from concurrent sessions easier to distinguish.
+The original Markdown remains unchanged for the Codex TUI. A separate Telegram
+copy is converted deterministically to supported Telegram HTML and split at safe
+message boundaries without any additional LLM or model call.
 
 ## Security and local data
 

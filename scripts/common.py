@@ -534,15 +534,36 @@ def send_message(
     silent: bool = False,
 ) -> int:
     secrets_to_mask = (config.bot_token,)
-    payload: dict[str, Any] = {
-        "chat_id": config.chat_id,
-        "text": redact_sensitive_text(text, extra_secrets=secrets_to_mask),
-    }
-    if reply_markup is not None:
-        payload["reply_markup"] = redact_telegram_markup(
+    safe_markup = (
+        redact_telegram_markup(
             reply_markup,
             extra_secrets=secrets_to_mask,
         )
+        if reply_markup is not None
+        else None
+    )
+    return _send_prepared_message(
+        config,
+        redact_sensitive_text(text, extra_secrets=secrets_to_mask),
+        reply_markup=safe_markup,
+        parse_mode=parse_mode,
+        silent=silent,
+    )
+
+
+def _send_prepared_message(
+    config: TelegramConfig,
+    text: str,
+    *,
+    reply_markup: dict[str, Any] | None = None,
+    parse_mode: str | None = None,
+    silent: bool = False,
+) -> int:
+    """Send text that has already passed the raw-data redaction boundary."""
+
+    payload: dict[str, Any] = {"chat_id": config.chat_id, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
     if parse_mode is not None:
         payload["parse_mode"] = parse_mode
     if silent:
@@ -554,6 +575,366 @@ def send_message(
     if not isinstance(message_id, int):
         raise TelegramBridgeError("Telegram sendMessage response has no message_id")
     return message_id
+
+
+_TELEGRAM_HTML_TOKEN_RE = re.compile(
+    r"(<[^>]+>|&(?:#[0-9]+|#x[0-9A-Fa-f]+|[A-Za-z]+);)"
+)
+_TELEGRAM_HTML_TAG_RE = re.compile(
+    r"^<\s*(/?)\s*([A-Za-z][A-Za-z0-9-]*)(?:\s[^>]*)?>$"
+)
+_MARKDOWN_ESCAPABLE = frozenset(r"\`*_{}[]()#+-.!|>~")
+
+
+def _find_unescaped(text: str, needle: str, start: int) -> int:
+    offset = start
+    while True:
+        offset = text.find(needle, offset)
+        if offset < 0:
+            return -1
+        backslashes = 0
+        cursor = offset - 1
+        while cursor >= 0 and text[cursor] == "\\":
+            backslashes += 1
+            cursor -= 1
+        if backslashes % 2 == 0:
+            return offset
+        offset += len(needle)
+
+
+def _parse_markdown_link(text: str, start: int) -> tuple[str, str, int] | None:
+    label_end = _find_unescaped(text, "](", start + 1)
+    if label_end < 0:
+        return None
+    cursor = label_end + 2
+    depth = 1
+    while cursor < len(text):
+        character = text[cursor]
+        if character == "\\" and cursor + 1 < len(text):
+            cursor += 2
+            continue
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                target = text[label_end + 2 : cursor]
+                if (
+                    re.match(r"^https?://", target, re.IGNORECASE)
+                    and not re.search(r"[\s<>]", target)
+                ):
+                    return text[start + 1 : label_end], target, cursor + 1
+                return None
+        cursor += 1
+    return None
+
+
+def _format_markdown_inline(
+    text: str,
+    *,
+    allow_code: bool = True,
+    disabled_tags: frozenset[str] = frozenset(),
+) -> str:
+    rendered: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        character = text[cursor]
+        if (
+            character == "\\"
+            and cursor + 1 < len(text)
+            and text[cursor + 1] in _MARKDOWN_ESCAPABLE
+        ):
+            rendered.append(html.escape(text[cursor + 1], quote=False))
+            cursor += 2
+            continue
+
+        if character == "`":
+            marker_end = cursor + 1
+            while marker_end < len(text) and text[marker_end] == "`":
+                marker_end += 1
+            marker = text[cursor:marker_end]
+            closing = _find_unescaped(text, marker, marker_end)
+            if closing >= marker_end:
+                code = text[marker_end:closing]
+                escaped_code = html.escape(code, quote=False)
+                rendered.append(
+                    f"<code>{escaped_code}</code>" if allow_code else escaped_code
+                )
+                cursor = closing + len(marker)
+                continue
+
+        if character == "[" and "a" not in disabled_tags:
+            link = _parse_markdown_link(text, cursor)
+            if link is not None:
+                label, target, cursor = link
+                safe_label = _format_markdown_inline(
+                    label,
+                    allow_code=False,
+                    disabled_tags=disabled_tags | {"a"},
+                )
+                rendered.append(
+                    f'<a href="{html.escape(target, quote=True)}">{safe_label}</a>'
+                )
+                continue
+
+        delimiter = ""
+        tag = ""
+        if text.startswith("**", cursor) or text.startswith("__", cursor):
+            delimiter, tag = text[cursor : cursor + 2], "b"
+        elif text.startswith("~~", cursor):
+            delimiter, tag = "~~", "s"
+        elif character == "*":
+            delimiter, tag = "*", "i"
+        elif character == "_" and (
+            cursor == 0 or not (text[cursor - 1].isalnum() or text[cursor - 1] == "_")
+        ):
+            delimiter, tag = "_", "i"
+
+        if delimiter and tag not in disabled_tags:
+            content_start = cursor + len(delimiter)
+            if content_start < len(text) and not text[content_start].isspace():
+                closing = _find_unescaped(text, delimiter, content_start)
+                while closing >= 0 and (
+                    closing == content_start
+                    or text[closing - 1].isspace()
+                    or (
+                        delimiter == "_"
+                        and closing + 1 < len(text)
+                        and (text[closing + 1].isalnum() or text[closing + 1] == "_")
+                    )
+                ):
+                    closing = _find_unescaped(text, delimiter, closing + len(delimiter))
+                if closing >= 0:
+                    content = text[content_start:closing]
+                    safe_content = _format_markdown_inline(
+                        content,
+                        allow_code=False,
+                        disabled_tags=disabled_tags | {tag},
+                    )
+                    rendered.append(f"<{tag}>{safe_content}</{tag}>")
+                    cursor = closing + len(delimiter)
+                    continue
+
+        rendered.append(html.escape(character, quote=False))
+        cursor += 1
+    return "".join(rendered)
+
+
+def _is_markdown_table_separator(line: str) -> bool:
+    stripped = line.strip().strip("|")
+    if "|" not in line:
+        return False
+    cells = [cell.strip() for cell in stripped.split("|")]
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells)
+
+
+def format_codex_markdown_for_telegram(text: str) -> str:
+    """Convert a conservative Markdown subset to Telegram-safe HTML."""
+
+    lines = str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    rendered: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+
+        fence = re.match(r"^\s*(`{3,}|~{3,})([^`]*)$", line)
+        if fence is not None:
+            marker = fence.group(1)
+            closing = index + 1
+            while closing < len(lines):
+                if re.fullmatch(
+                    rf"\s*{re.escape(marker[0])}{{{len(marker)},}}\s*",
+                    lines[closing],
+                ):
+                    break
+                closing += 1
+            if closing < len(lines):
+                code = "\n".join(lines[index + 1 : closing])
+                rendered.append(f"<pre><code>{html.escape(code, quote=False)}</code></pre>")
+                index = closing + 1
+                continue
+            rendered.extend(html.escape(item, quote=False) for item in lines[index:])
+            break
+
+        if (
+            index + 1 < len(lines)
+            and "|" in line
+            and _is_markdown_table_separator(lines[index + 1])
+        ):
+            closing = index + 2
+            while (
+                closing < len(lines)
+                and "|" in lines[closing]
+                and lines[closing].strip()
+            ):
+                closing += 1
+            table = "\n".join(lines[index:closing])
+            rendered.append(f"<pre>{html.escape(table, quote=False)}</pre>")
+            index = closing
+            continue
+
+        quote_match = re.match(r"^\s*>\s?(.*)$", line)
+        if quote_match is not None:
+            quote_lines: list[str] = []
+            while index < len(lines):
+                quote_match = re.match(r"^\s*>\s?(.*)$", lines[index])
+                if quote_match is None:
+                    break
+                quote_lines.append(
+                    _format_markdown_inline(
+                        quote_match.group(1),
+                        allow_code=False,
+                    )
+                )
+                index += 1
+            quote_body = "\n".join(quote_lines)
+            rendered.append(f"<blockquote>{quote_body}</blockquote>")
+            continue
+
+        heading = re.match(
+            r"^\s{0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+[ \t]*)?$",
+            line,
+        )
+        if heading is not None:
+            heading_body = _format_markdown_inline(
+                heading.group(1),
+                allow_code=False,
+                disabled_tags=frozenset({"b"}),
+            )
+            rendered.append(f"<b>{heading_body}</b>")
+            index += 1
+            continue
+
+        unordered = re.match(r"^(\s*)[-+*]\s+(.+)$", line)
+        if unordered is not None:
+            rendered.append(
+                f"{html.escape(unordered.group(1), quote=False)}• "
+                f"{_format_markdown_inline(unordered.group(2))}"
+            )
+            index += 1
+            continue
+
+        ordered = re.match(r"^(\s*)(\d+)[.)]\s+(.+)$", line)
+        if ordered is not None:
+            rendered.append(
+                f"{html.escape(ordered.group(1), quote=False)}{ordered.group(2)}. "
+                f"{_format_markdown_inline(ordered.group(3))}"
+            )
+            index += 1
+            continue
+
+        rendered.append(_format_markdown_inline(line))
+        index += 1
+
+    return "\n".join(rendered)
+
+
+def _utf16_units(text: str) -> int:
+    return len(text.encode("utf-16-le")) // 2
+
+
+def _html_token_visible_units(token: str) -> int:
+    if token.startswith("<"):
+        return 0
+    return _utf16_units(html.unescape(token))
+
+
+def _split_text_by_utf16_units(text: str, limit: int) -> tuple[str, str]:
+    used = 0
+    offset = 0
+    boundary_offset = 0
+    boundary_units = 0
+    for character in text:
+        units = _utf16_units(character)
+        if used + units > limit:
+            break
+        used += units
+        offset += len(character)
+        if character.isspace():
+            boundary_offset = offset
+            boundary_units = used
+    if (
+        offset < len(text)
+        and boundary_offset
+        and boundary_units >= max(1, used // 2)
+    ):
+        offset = boundary_offset
+    return text[:offset], text[offset:]
+
+
+def split_telegram_html(text: str, max_visible_units: int) -> list[str]:
+    """Split safe Telegram HTML into independently valid UTF-16-sized chunks."""
+
+    if max_visible_units < 1:
+        raise ValueError("max_visible_units must be positive")
+    if not text:
+        return [""]
+
+    raw_tokens = _TELEGRAM_HTML_TOKEN_RE.split(text)
+    tokens = [token for token in raw_tokens if token]
+    chunks: list[str] = []
+    current: list[str] = []
+    open_tags: list[tuple[str, str]] = []
+    visible_units = 0
+
+    def finish_chunk() -> None:
+        nonlocal current, visible_units
+        if not current:
+            return
+        chunks.append("".join(current + [f"</{name}>" for name, _ in reversed(open_tags)]))
+        current = [opening for _, opening in open_tags]
+        visible_units = 0
+
+    for token in tokens:
+        tag_match = _TELEGRAM_HTML_TAG_RE.match(token) if token.startswith("<") else None
+        if tag_match is not None:
+            closing, name = tag_match.groups()
+            name = name.lower()
+            current.append(token)
+            if closing:
+                if open_tags and open_tags[-1][0] == name:
+                    open_tags.pop()
+            else:
+                open_tags.append((name, token))
+            continue
+
+        remaining = token
+        while remaining:
+            available = max_visible_units - visible_units
+            if available <= 0:
+                finish_chunk()
+                available = max_visible_units
+
+            if remaining.startswith("&") and remaining.endswith(";"):
+                token_units = _html_token_visible_units(remaining)
+                if token_units > available and visible_units:
+                    finish_chunk()
+                    continue
+                if token_units > available:
+                    raise ValueError(
+                        "max_visible_units cannot contain one HTML entity"
+                    )
+                current.append(remaining)
+                visible_units += token_units
+                remaining = ""
+                continue
+
+            prefix, suffix = _split_text_by_utf16_units(remaining, available)
+            if not prefix:
+                if visible_units:
+                    finish_chunk()
+                    continue
+                raise ValueError(
+                    "max_visible_units cannot contain one Unicode character"
+                )
+            current.append(prefix)
+            visible_units += _utf16_units(prefix)
+            remaining = suffix
+            if remaining:
+                finish_chunk()
+
+    finish_chunk()
+    return chunks or [""]
 
 
 def edit_message(
@@ -584,17 +965,65 @@ def send_codex_notification(
     silent: bool = False,
 ) -> int:
     cfg = config or load_telegram_config()
-    clipped = text.strip()
-    if len(clipped) > 3500:
-        clipped = clipped[:3499] + "…"
-    safe_title = html.escape(title, quote=False)
-    safe_body = html.escape(clipped or "(내용 없음)", quote=False)
-    return send_message(
-        cfg,
-        f"<b>{safe_title}</b>\n\n{safe_body}",
-        parse_mode="HTML",
-        silent=silent,
+    secrets_to_mask = (cfg.bot_token,)
+    redacted_title = redact_sensitive_text(title, extra_secrets=secrets_to_mask)
+    raw_body = str(text)
+    redacted_body = redact_sensitive_text(
+        raw_body if raw_body.strip() else "(내용 없음)",
+        extra_secrets=secrets_to_mask,
     )
+    safe_title = html.escape(redacted_title, quote=False)
+    formatted_body = format_codex_markdown_for_telegram(redacted_body)
+
+    title_units = _utf16_units(html.unescape(safe_title))
+    fixed_units = title_units + _utf16_units("\n\n")
+    if fixed_units >= 4096:
+        raise TelegramBridgeError("Telegram notification title is too long")
+    base_budget = 4096 - fixed_units
+    try:
+        body_chunks = split_telegram_html(formatted_body, base_budget)
+    except ValueError as exc:
+        raise TelegramBridgeError(
+            f"Telegram notification cannot be split safely: {exc}"
+        ) from exc
+    if len(body_chunks) > 1:
+        while True:
+            count = len(body_chunks)
+            suffix_units = _utf16_units(f" ({count}/{count})")
+            numbered_budget = base_budget - suffix_units
+            if numbered_budget < 1:
+                raise TelegramBridgeError(
+                    "Telegram notification title leaves no room for chunk numbering"
+                )
+            try:
+                revised = split_telegram_html(
+                    formatted_body,
+                    numbered_budget,
+                )
+            except ValueError as exc:
+                raise TelegramBridgeError(
+                    f"Telegram notification cannot be split safely: {exc}"
+                ) from exc
+            if len(revised) == count:
+                body_chunks = revised
+                break
+            body_chunks = revised
+
+    first_message_id: int | None = None
+    count = len(body_chunks)
+    for index, body_chunk in enumerate(body_chunks, start=1):
+        suffix = f" ({index}/{count})" if count > 1 else ""
+        message_id = _send_prepared_message(
+            cfg,
+            f"<b>{safe_title}{suffix}</b>\n\n{body_chunk}",
+            parse_mode="HTML",
+            silent=silent,
+        )
+        if first_message_id is None:
+            first_message_id = message_id
+    if first_message_id is None:
+        raise TelegramBridgeError("Telegram notification produced no messages")
+    return first_message_id
 
 
 def _short_hash(source: str) -> str:
