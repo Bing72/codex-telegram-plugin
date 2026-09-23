@@ -58,6 +58,16 @@ and Telegram receives inline buttons. The first completed answer wins; the
 other channel is closed or cancelled. Clients without elicitation support keep
 the existing Telegram-only fallback.
 
+To send selectable Codex questions to Telegram even while the local session is
+open, set `"question_routing": "telegram_choices"` in the local
+`~/.config/codex-telegram-plugin/config.json`. The SessionStart hook then
+directs agents to use `ask_user` for choice questions and fall back to native
+questions if Telegram delivery fails. Free-text questions remain native-first.
+This routes agent-initiated questions; it does not intercept arbitrary Codex
+CLI dialogs or change approval handling. Existing open sessions receive the
+same routing guidance on their next user prompt; an already-running turn is
+not changed. The setting survives plugin setup.
+
 Telegram is also the response channel for plugin-managed approval prompts. If a
 Telegram approval fails or times out, the hook returns no decision and Codex
 falls back to its native approval flow.

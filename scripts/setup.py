@@ -29,6 +29,7 @@ from common import (  # noqa: E402
     LEGACY_OPENCODE_ENV_PATH,
     TelegramBridgeError,
     _telegram_api,
+    load_runtime_settings,
     load_telegram_config,
     redact_sensitive_text,
 )
@@ -82,6 +83,8 @@ def write_settings(
         "receiver": receiver,
         "terminal_mirror": True,
     }
+    if load_runtime_settings().get("question_routing") == "telegram_choices":
+        payload["question_routing"] = "telegram_choices"
     atomic_write_text(
         DEFAULT_SETTINGS_PATH,
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n",

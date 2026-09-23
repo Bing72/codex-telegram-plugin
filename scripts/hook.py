@@ -18,6 +18,7 @@ from common import (  # noqa: E402
     bridge_url,
     clear_session_permissions,
     is_always_allowed,
+    load_runtime_settings,
     permission_fingerprint,
     register_session,
     remember_always_allowed,
@@ -52,6 +53,17 @@ def emit(payload: dict[str, Any]) -> None:
     sys.stdout.write("\n")
 
 
+def telegram_choice_guidance() -> str | None:
+    if load_runtime_settings().get("question_routing") != "telegram_choices":
+        return None
+    return (
+        "선택지에서 항목을 고르는 사용자 질문은 현재 Codex 세션이 열려 있어도 "
+        "codex-telegram MCP의 ask_user 도구로 보내 Telegram에도 표시하세요. "
+        "ask_user를 사용할 수 없거나 전송에 실패하면 Codex native 질문 UI로 "
+        "되돌아가세요. 자유 입력 질문은 현재 세션의 native 질문 UI를 우선 사용하세요. "
+    )
+
+
 def handle_session_start(data: dict[str, Any]) -> None:
     session_id = str(data.get("session_id") or "")
     cwd = str(data.get("cwd") or os.getcwd())
@@ -62,21 +74,28 @@ def handle_session_start(data: dict[str, Any]) -> None:
             cwd=cwd,
             status="idle",
         )
+    question_guidance = telegram_choice_guidance()
+    if question_guidance is None:
+        question_guidance = (
+            "사용자가 현재 Codex 세션에 있으면 native 질문 UI를 우선 사용하고, "
+            "그것이 없으면 세션에 한 개의 간결한 일반 질문을 표시한 뒤 로컬 답변을 "
+            "기다리세요. 현재 세션에서 답을 받을 수 없거나 사용자가 원격 Telegram "
+            "응답을 명시적으로 원할 때만 codex-telegram MCP의 ask_user 도구를 "
+            "사용하세요. "
+        )
+    additional_context = (
+        "Telegram 연동이 활성화되어 있습니다. "
+        + question_guidance
+        + "ask_user 질문은 Telegram 상단에 실제 세션 제목을 표시하고, "
+        "MCP 진행 메시지와 동일 요청 ID로 현재 Codex 세션에도 표시합니다. "
+        "ask_user를 호출한 경우 실제 답변은 Telegram에서 받고 Codex로 자동 전달됩니다. "
+        "완료 알림도 같은 Telegram 대화에 전달됩니다."
+    )
     emit(
         {
             "hookSpecificOutput": {
                 "hookEventName": "SessionStart",
-                "additionalContext": (
-                    "Telegram 연동이 활성화되어 있습니다. 사용자가 현재 Codex 세션에 "
-                    "있으면 native 질문 UI를 우선 사용하고, 그것이 없으면 세션에 한 개의 "
-                    "간결한 일반 질문을 표시한 뒤 로컬 답변을 기다리세요. 현재 세션에서 "
-                    "답을 받을 수 없거나 사용자가 원격 Telegram 응답을 명시적으로 원할 "
-                    "때만 codex-telegram MCP의 ask_user 도구를 사용하세요. ask_user 질문은 "
-                    "Telegram 상단에 실제 세션 제목을 표시하고, MCP 진행 메시지와 동일 "
-                    "요청 ID로 현재 Codex 세션에도 표시합니다. ask_user를 호출한 경우 실제 "
-                    "답변은 Telegram에서 받고 Codex로 자동 전달됩니다. 완료 알림도 같은 "
-                    "Telegram 대화에 전달됩니다."
-                ),
+                "additionalContext": additional_context,
             }
         }
     )
@@ -92,7 +111,18 @@ def handle_user_prompt(data: dict[str, Any]) -> None:
             cwd=cwd,
             status="busy",
         )
-    emit({})
+    guidance = telegram_choice_guidance()
+    if guidance is None:
+        emit({})
+    else:
+        emit(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": guidance,
+                }
+            }
+        )
 
 
 def handle_interrupt(data: dict[str, Any]) -> None:

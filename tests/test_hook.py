@@ -55,6 +55,7 @@ class HookOutputTests(unittest.TestCase):
         emitted: list[dict[str, object]] = []
         with (
             mock.patch.object(hook, "register_session"),
+            mock.patch.object(hook, "load_runtime_settings", return_value={}),
             mock.patch.object(hook, "emit", side_effect=emitted.append),
         ):
             hook.handle_session_start({"session_id": "session-1", "cwd": "/tmp"})
@@ -64,6 +65,52 @@ class HookOutputTests(unittest.TestCase):
         self.assertIn("일반 질문을 표시한 뒤 로컬 답변을 기다리세요", context)
         self.assertIn("Telegram 상단에 실제 세션 제목", context)
         self.assertIn("MCP 진행 메시지", context)
+
+    def test_session_start_routes_choice_questions_to_telegram_when_configured(self) -> None:
+        emitted: list[dict[str, object]] = []
+        with (
+            mock.patch.object(hook, "register_session"),
+            mock.patch.object(
+                hook,
+                "load_runtime_settings",
+                return_value={"question_routing": "telegram_choices"},
+            ),
+            mock.patch.object(hook, "emit", side_effect=emitted.append),
+        ):
+            hook.handle_session_start({"session_id": "session-1", "cwd": "/tmp"})
+
+        context = emitted[0]["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("선택지에서 항목을 고르는 사용자 질문", context)
+        self.assertIn("ask_user 도구로 보내 Telegram에도 표시", context)
+        self.assertIn("전송에 실패하면 Codex native 질문 UI", context)
+        self.assertIn("자유 입력 질문은", context)
+
+    def test_existing_session_gets_choice_routing_on_next_user_prompt(self) -> None:
+        emitted: list[dict[str, object]] = []
+        with (
+            mock.patch.object(hook, "register_session"),
+            mock.patch.object(
+                hook,
+                "load_runtime_settings",
+                return_value={"question_routing": "telegram_choices"},
+            ),
+            mock.patch.object(hook, "emit", side_effect=emitted.append),
+        ):
+            hook.handle_user_prompt({"session_id": "already-open", "cwd": "/tmp"})
+
+        output = emitted[0]["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], "UserPromptSubmit")
+        self.assertIn("ask_user 도구로 보내 Telegram에도 표시", output["additionalContext"])
+
+    def test_unconfigured_user_prompt_does_not_add_context(self) -> None:
+        with (
+            mock.patch.object(hook, "register_session"),
+            mock.patch.object(hook, "load_runtime_settings", return_value={}),
+            mock.patch.object(hook, "emit") as emit,
+        ):
+            hook.handle_user_prompt({"session_id": "already-open", "cwd": "/tmp"})
+
+        emit.assert_called_once_with({})
 
     def test_permission_output_can_mirror_result_to_codex_ui(self) -> None:
         output = hook.permission_output(

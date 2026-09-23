@@ -7,11 +7,14 @@ description: Use the installed Telegram bridge when Codex needs a real user answ
 
 ## Rules
 
-1. While the user is present in the current Codex session, prefer its native
-   question surface or ask one concise in-session question and wait for the
-   local answer. Use the `codex-telegram` MCP server's `ask_user` tool only when
-   the current session cannot receive the answer or the user explicitly wants
-   a remote Telegram response.
+1. When `question_routing` is `telegram_choices`, send selectable user
+   questions through the `codex-telegram` MCP server's `ask_user` tool even if
+   the current Codex session is open. This is the user's explicit Telegram
+   delivery preference. If `ask_user` is unavailable or fails, fall back to
+   the native question UI. Otherwise, while the user is present, prefer the
+   native question surface or one concise in-session question and wait for the
+   local answer. Use `ask_user` for other questions only when the current
+   session cannot receive the answer or the user explicitly requests Telegram.
 2. Provide one to three concise questions. Prefer two or three mutually
    exclusive options and keep custom input enabled when free text is useful.
 3. Never include tokens, credentials, private keys, or full secret-bearing
