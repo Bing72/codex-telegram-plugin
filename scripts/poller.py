@@ -265,7 +265,7 @@ class StandaloneTelegramPoller:
                 message_id,
                 self._question_status_text(
                     pending,
-                    "⏳ Codex에 답변을 전달하는 중입니다…",
+                    f"⏳ {pending.get('agentName') or 'Codex'}에 답변을 전달하는 중입니다…",
                 ),
             )
             return
@@ -280,6 +280,7 @@ class StandaloneTelegramPoller:
                 questions,
                 next_index,
                 session_name=str(pending.get("sessionTitle") or "") or None,
+                agent_name=str(pending.get("agentName") or "Codex"),
             ),
             self._question_keyboard(
                 short_hash,
@@ -378,6 +379,7 @@ class StandaloneTelegramPoller:
                     questions,
                     index,
                     session_name=str(pending.get("sessionTitle") or "") or None,
+                    agent_name=str(pending.get("agentName") or "Codex"),
                 ),
                 self._question_keyboard(
                     short_hash,
@@ -436,6 +438,7 @@ class StandaloneTelegramPoller:
                             questions,
                             index,
                             session_name=str(pending.get("sessionTitle") or "") or None,
+                            agent_name=str(pending.get("agentName") or "Codex"),
                         ),
                         self._question_keyboard(
                             path.stem,

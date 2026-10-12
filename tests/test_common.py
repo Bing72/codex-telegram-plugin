@@ -612,6 +612,16 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(text.splitlines()[0], "🧵 세션: Telegram 표시 점검")
         self.assertIn("❓ [Codex] 확인", text)
 
+    def test_question_text_can_identify_hermes(self) -> None:
+        text = common._question_text(
+            [{"header": "선택", "question": "진행할까요?", "options": []}],
+            0,
+            session_name="Hermes · 작업",
+            agent_name="Hermes",
+        )
+        self.assertIn("❓ [Hermes] 선택", text)
+        self.assertNotIn("[Codex]", text)
+
     def test_resolve_session_name_uses_local_bridge_title(self) -> None:
         response = io.BytesIO(
             json.dumps({"title": "  실제   세션 제목  "}).encode("utf-8")
@@ -680,6 +690,30 @@ class CommonTests(unittest.TestCase):
         edit.assert_called_once()
         self.assertEqual(mirror.call_count, 2)
         self.assertEqual(mirror.call_args_list[0].args[1], mirror.call_args_list[1].args[1])
+        self.assertEqual(list(pending_dir.glob("*.json")), [])
+        pending_dir.rmdir()
+
+    def test_hermes_question_handoff_uses_hermes_identity(self) -> None:
+        config = make_config("hermes-question")
+        pending_dir = common.pending_question_dir(config)
+        sent: list[str] = []
+        with (
+            mock.patch.object(common, "send_message", side_effect=lambda _cfg, text, **_kw: sent.append(text) or 12),
+            mock.patch.object(common, "edit_message") as edit,
+            mock.patch.object(common, "mirror_terminal_event"),
+        ):
+            with self.assertRaises(TimeoutError):
+                common.ask_questions(
+                    [{"header": "선택", "question": "어떻게 할까요?", "options": ["A"]}],
+                    session_id="hermes-1",
+                    server_url="http://127.0.0.1:43991/",
+                    timeout_seconds=0,
+                    config=config,
+                    session_name="Hermes · 작업",
+                    agent_name="Hermes",
+                )
+        self.assertIn("❓ [Hermes]", sent[0])
+        self.assertIn("Hermes 질문이 만료", edit.call_args.args[2])
         self.assertEqual(list(pending_dir.glob("*.json")), [])
         pending_dir.rmdir()
 

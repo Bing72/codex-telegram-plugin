@@ -14,13 +14,16 @@ https://github.com/Bing72/codex-telegram-plugin
 Follow these requirements:
 
 1. Read INSTALL.md and SECURITY.md before making changes.
-2. Inspect the current Codex installation, plugin support, existing external
-   Telegram receiver, credential-file references, and relevant user services.
+2. Inspect the current Codex installation, plugin support, installed Hermes
+   and active `$HERMES_HOME` profile (if available), existing external Telegram
+   receiver, credential-file references, and relevant user services. On an
+   update, inspect the existing plugin mode and approval transport first.
 3. Before changing anything, report:
    - the proposed runtime mode (`shared` or `standalone`),
    - every command you intend to run,
-   - the files and user services that will change,
-   - whether a service will be installed, enabled, disabled, or restarted.
+   - the files, Hermes profile plugin directory, approval transport, and user
+     services that will change,
+   - whether a service or Hermes gateway will be restarted.
    Then wait for my confirmation.
 4. Never print, echo, log, commit, upload, or copy a live bot token, chat ID, or
    allowed-user ID into the repository or plugin source files.
@@ -31,15 +34,23 @@ Follow these requirements:
    the missing values through secure input and store them outside the checkout
    in a user-owned mode `0600` file.
 7. Clone the repository, add its Codex marketplace, install the plugin, and run
-   `scripts/setup.py` with the selected mode. Use `--install-services` only on
-   Linux systems that support `systemd --user`.
+   `scripts/setup.py` with the selected mode. On updates, pull after reviewing
+   local changes, refresh the Codex plugin cache (`codex plugin add
+   codex-telegram-plugin@<marketplace>`), then run
+   `python3 scripts/setup.py --refresh`; this also updates the installed Hermes
+   adapter when Hermes is available. Use `--install-services` only on Linux
+   systems that support `systemd --user` and when the service impact was approved.
 8. Keep the Codex bridge bound to loopback. Do not expose it through a public
    bind, reverse proxy, container port mapping, SSH remote forward, or tunnel.
-9. After installation, verify the test suite, manifests, plugin registration,
+9. After installation, verify the test suite, manifests, Codex registration,
    applicable user services, loopback health endpoint, Telegram connection,
-   and the absence of credentials in tracked or installed package files.
-10. Start a new Codex process after installation so the current plugin cache,
-    hooks, and MCP launcher are loaded.
+   and the absence of credentials in tracked or installed package files. If
+   Hermes is installed, also verify the profile-scoped plugin, the question
+   tool, and the selected approval transport. Do not claim that native Hermes
+   `clarify` is automatically intercepted; the adapter exposes its own tool.
+10. Start new Codex and Hermes processes after installation so plugin caches,
+    hooks, and the MCP launcher load the current code. Restart a live Hermes
+    gateway only after disclosing its impact and obtaining confirmation.
 11. Do not commit, push, delete unrelated files, or change unrelated services
     unless I explicitly request it.
 ```
@@ -67,6 +78,30 @@ Confirm that Codex sees the plugin:
 ```bash
 codex plugin list
 ```
+
+## Update an existing installation
+
+Inspect local changes and the active Hermes profile/approval transport first.
+After updating the checkout and refreshing the Codex plugin cache, reapply both
+integrations without re-entering credentials or changing receiver mode:
+
+```bash
+git pull --ff-only
+codex plugin add codex-telegram-plugin@<marketplace>
+python3 scripts/setup.py --refresh
+```
+
+Use the marketplace name reported by `codex plugin list`; do not type the
+literal `<marketplace>` placeholder. `--refresh` checks the existing credential
+reference and updates `~/.local/bin/codex-telegram-mcp`. When `hermes` is found
+on `PATH`, it copies the adapter into the active profile's
+`plugins/codex-telegram-bridge/` directory, enables it, and selects the
+`codex-telegram` approval transport if `builtin` is currently selected. An
+existing custom transport or unrelated Hermes plugins are preserved. Neither
+refresh nor initial setup starts a second Telegram poller for the same bot.
+Add `--install-services` only when a systemd user-service restart is intended.
+New Hermes/Codex processes load the updated plugin; restart a live Hermes
+gateway only after confirming that interruption is acceptable.
 
 ## Choose a runtime mode
 
@@ -181,6 +216,7 @@ python3 -m unittest discover -s tests -v
 python3 -m compileall -q scripts tests
 python3 -m json.tool .codex-plugin/plugin.json >/dev/null
 python3 -m json.tool .agents/plugins/marketplace.json >/dev/null
+hermes plugins validate hermes_plugin  # if Hermes is installed
 ```
 
 On Linux installations that use user services, inspect the services applicable

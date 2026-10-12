@@ -115,6 +115,20 @@ class StandalonePollerTests(unittest.TestCase):
             path.unlink()
             pending_dir.rmdir()
 
+    def test_hermes_question_status_retains_identity(self) -> None:
+        config = make_config("hermes")
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_poller(config, Path(directory))
+            path = Path(directory) / "pending.json"
+            pending = {
+                "agentName": "Hermes", "sessionTitle": "Hermes · 작업",
+                "questions": [{"header": "확인", "question": "진행할까요?", "options": []}],
+                "answersInProgress": [["예"]],
+            }
+            with mock.patch.object(service, "_safe_edit") as edit:
+                service._complete_question_if_ready(path, "hash", pending, 10)
+            self.assertIn("Hermes에 답변", edit.call_args.args[1])
+
     def test_permission_callback_reaches_one_shot_codex_server(self) -> None:
         config = make_config("permission")
         with tempfile.TemporaryDirectory() as directory:

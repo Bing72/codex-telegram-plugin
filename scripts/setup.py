@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
 import json
 import os
 import shlex
@@ -18,6 +19,7 @@ from typing import Any
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = SCRIPT_DIR.parent
+HERMES_PLUGIN_NAME = "codex-telegram-bridge"
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -68,6 +70,74 @@ def install_launchers() -> None:
     )
 
 
+def hermes_home() -> Path:
+    return Path(os.environ.get("HERMES_HOME") or (Path.home() / ".hermes")).expanduser().resolve()
+
+
+def _hermes_command(hermes: str, *args: str) -> str:
+    try:
+        completed = subprocess.run(
+            [hermes, *args], check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise TelegramBridgeError("Hermes plugin configuration failed; inspect Hermes locally") from exc
+    return completed.stdout.strip()
+
+
+def install_hermes() -> bool:
+    """Refresh the opt-in Hermes adapter in the active profile, if Hermes is installed."""
+    hermes = shutil.which("hermes")
+    if not hermes:
+        return False
+    destination = hermes_home() / "plugins" / HERMES_PLUGIN_NAME
+    marker = destination / "bridge-source.json"
+    source = PLUGIN_ROOT / "hermes_plugin"
+    filenames = ("plugin.yaml", "__init__.py")
+    contents = {name: (source / name).read_text(encoding="utf-8") for name in filenames}
+    if destination.exists() or destination.is_symlink():
+        if destination.is_symlink() or not marker.is_file():
+            raise TelegramBridgeError("Hermes plugin directory is not managed by this installer")
+        try:
+            existing = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TelegramBridgeError("Hermes plugin ownership marker is invalid") from exc
+        if existing.get("managed_by") != "codex-telegram-plugin":
+            raise TelegramBridgeError("Hermes plugin directory is not managed by this installer")
+        installed_hashes = existing.get("installed_sha256") or {
+            name: hashlib.sha256(contents[name].encode("utf-8")).hexdigest() for name in filenames
+        }
+        for name in filenames:
+            target = destination / name
+            if (
+                target.is_symlink()
+                or not target.is_file()
+                or hashlib.sha256(target.read_bytes()).hexdigest() != installed_hashes.get(name)
+            ):
+                raise TelegramBridgeError("Hermes adapter has local changes; refusing to overwrite")
+    for filename, text in contents.items():
+        atomic_write_text(destination / filename, text, 0o644)
+    atomic_write_text(
+        marker,
+        json.dumps({
+            "managed_by": "codex-telegram-plugin", "plugin_root": str(PLUGIN_ROOT),
+            "installed_sha256": {
+                name: hashlib.sha256(text.encode("utf-8")).hexdigest()
+                for name, text in contents.items()
+            },
+        }, indent=2) + "\n",
+        0o600,
+    )
+    _hermes_command(hermes, "plugins", "enable", HERMES_PLUGIN_NAME)
+    selected = _hermes_command(hermes, "config", "get", "security.approval.transport")
+    if selected in {"", "builtin", "codex-telegram"}:
+        if selected != "codex-telegram":
+            _hermes_command(hermes, "config", "set", "security.approval.transport", "codex-telegram")
+    else:
+        print("Hermes approval transport is already customized; leaving it unchanged")
+    return True
+
+
 def write_settings(
     *,
     mode: str,
@@ -75,15 +145,17 @@ def write_settings(
     shared_dir: Path,
     receiver: str,
 ) -> None:
-    payload = {
+    previous = load_runtime_settings()
+    payload = dict(previous)
+    payload.update({
         "version": 1,
         "mode": mode,
         "env_path": str(env_path),
         "shared_dir": str(shared_dir),
         "receiver": receiver,
-        "terminal_mirror": True,
-    }
-    if load_runtime_settings().get("question_routing") == "telegram_choices":
+        "terminal_mirror": previous.get("terminal_mirror") is not False,
+    })
+    if previous.get("question_routing") == "telegram_choices":
         payload["question_routing"] = "telegram_choices"
     atomic_write_text(
         DEFAULT_SETTINGS_PATH,
@@ -271,8 +343,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Configure Codex Telegram shared or standalone mode."
     )
-    parser.add_argument("--mode", choices=["shared", "standalone"], required=True)
-    source = parser.add_mutually_exclusive_group(required=True)
+    parser.add_argument("--mode", choices=["shared", "standalone"])
+    source = parser.add_mutually_exclusive_group()
     source.add_argument(
         "--reuse-opencode",
         action="store_true",
@@ -298,24 +370,50 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Call Telegram getMe after configuration.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--refresh", action="store_true",
+        help="Reapply the existing receiver configuration and refresh Hermes integration.",
+    )
+    args = parser.parse_args()
+    if args.refresh:
+        if args.mode or args.reuse_opencode or args.env_file or args.configure_token:
+            parser.error("--refresh cannot be combined with --mode or a credential source")
+    elif not args.mode or not (args.reuse_opencode or args.env_file or args.configure_token):
+        parser.error("initial setup requires --mode and a credential source")
+    return args
 
 
 def main() -> int:
     args = parse_args()
-    if args.reuse_opencode:
+    if args.refresh:
+        settings = load_runtime_settings()
+        if (
+            settings.get("mode") not in {"shared", "standalone"}
+            or not settings.get("env_path")
+            or not settings.get("shared_dir")
+            or settings.get("receiver") not in {"opencode", "external", "standalone"}
+        ):
+            raise TelegramBridgeError("No existing Codex Telegram configuration to refresh")
+        mode = settings["mode"]
+        env_path = Path(settings["env_path"])
+        shared_dir = Path(settings["shared_dir"])
+        receiver = settings["receiver"]
+    elif args.reuse_opencode:
+        mode = args.mode
         if args.mode != "shared":
             raise TelegramBridgeError("--reuse-opencode requires --mode shared")
         env_path = LEGACY_OPENCODE_ENV_PATH
         shared_dir = LEGACY_OPENCODE_CONFIG_DIR
         receiver = "opencode"
     elif args.configure_token:
+        mode = args.mode
         if args.mode != "standalone":
             raise TelegramBridgeError("--configure-token requires --mode standalone")
         env_path = configure_credentials()
         shared_dir = DEFAULT_PLUGIN_CONFIG_DIR
         receiver = "standalone"
     else:
+        mode = args.mode
         env_path = args.env_file.expanduser().resolve()
         shared_dir = (
             LEGACY_OPENCODE_CONFIG_DIR
@@ -329,17 +427,19 @@ def main() -> int:
     validate_config(env_path)
     install_launchers()
     write_settings(
-        mode=args.mode,
+        mode=mode,
         env_path=env_path,
         shared_dir=shared_dir,
         receiver=receiver,
     )
+    hermes_enabled = install_hermes()
     if args.install_services:
-        install_services(args.mode, receiver)
+        install_services(mode, receiver)
     if args.test_connection:
         test_connection(env_path)
-    print(f"mode={args.mode}")
+    print(f"mode={mode}")
     print(f"receiver={receiver}")
+    print(f"hermes_adapter={'enabled' if hermes_enabled else 'not-installed'}")
     print(f"settings={DEFAULT_SETTINGS_PATH}")
     print(f"credentials={env_path}")
     print("token_copied=false" if args.reuse_opencode else "token_copied=not-applicable")

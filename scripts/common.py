@@ -1061,6 +1061,7 @@ def _question_text(
     index: int,
     *,
     session_name: str | None = None,
+    agent_name: str = "Codex",
 ) -> str:
     question = questions[index]
     progress = f"질문 {index + 1}/{len(questions)} · " if len(questions) > 1 else ""
@@ -1069,7 +1070,7 @@ def _question_text(
     lines: list[str] = []
     if session_name:
         lines.extend([f"🧵 세션: {session_name}", ""])
-    lines.extend([f"❓ [Codex] {progress}{header}", "", prompt])
+    lines.extend([f"❓ [{agent_name}] {progress}{header}", "", prompt])
     options = question.get("options") or []
     if options:
         lines.extend(["", "Options:", ""])
@@ -1170,6 +1171,7 @@ def ask_questions(
     config: TelegramConfig | None = None,
     request_id: str | None = None,
     session_name: str | None = None,
+    agent_name: str = "Codex",
     cancel_event: threading.Event | None = None,
     cancel_message: str = "✅ Codex에서 답변을 받았습니다.",
 ) -> list[list[str]] | None:
@@ -1184,7 +1186,7 @@ def ask_questions(
     now_ms = int(time.time() * 1000)
     message_id = send_message(
         cfg,
-        _question_text(normalized, 0, session_name=display_session_name),
+        _question_text(normalized, 0, session_name=display_session_name, agent_name=agent_name),
         reply_markup=_question_keyboard(short_hash, normalized[0], 0),
     )
     path = pending_question_dir(cfg) / f"{short_hash}.json"
@@ -1192,6 +1194,7 @@ def ask_questions(
         "requestID": request_id,
         "sessionID": session_id,
         "sessionTitle": display_session_name,
+        "agentName": agent_name,
         "serverUrl": server_url,
         "ownerInstanceID": owner_id,
         "ownerPID": os.getpid(),
@@ -1253,7 +1256,7 @@ def ask_questions(
                             message_id,
                             (
                                 f"🧵 세션: {display_session_name}\n\n"
-                                "✅ Codex에 답변을 전달했습니다."
+                                f"✅ {agent_name}에 답변을 전달했습니다."
                             ),
                         )
                     except TelegramBridgeError:
@@ -1266,7 +1269,7 @@ def ask_questions(
                     mirror_terminal_event(
                         "질문",
                         short_hash,
-                        "Telegram 답변을 Codex에 전달했습니다.",
+                        f"Telegram 답변을 {agent_name}에 전달했습니다.",
                         answer_details,
                         state="응답 완료",
                     )
@@ -1276,7 +1279,7 @@ def ask_questions(
             edit_message(
                 cfg,
                 message_id,
-                f"🧵 세션: {display_session_name}\n\n⌛ Codex 질문이 만료됐습니다.",
+                f"🧵 세션: {display_session_name}\n\n⌛ {agent_name} 질문이 만료됐습니다.",
             )
         except TelegramBridgeError:
             pass

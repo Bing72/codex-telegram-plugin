@@ -14,12 +14,14 @@ To have a coding agent perform the installation, send it this prompt:
 Install and validate the Codex Telegram plugin from
 https://github.com/Bing72/codex-telegram-plugin by following INSTALL.md.
 
-Before changing anything, inspect the current Codex, external Telegram
-receiver, and user-service configuration. Show me the proposed mode, commands,
-affected files, and service impact, then wait for my confirmation. Never print
-or copy live Telegram credentials into the repository, logs, or plugin source
-files. Do not commit, push, or expose a local bridge port unless I explicitly
-ask.
+Before changing anything, inspect the current Codex, installed Hermes/profile
+(if present), external Telegram receiver, and user-service configuration. Show
+me the proposed mode, commands, affected files (including Hermes's plugin
+folder and approval transport), and service impact, then wait for my
+confirmation. Never print or copy live Telegram credentials into the repository,
+logs, or plugin source files. Do not commit, push, or expose a local bridge
+port unless I explicitly ask. On updates, rerun `scripts/setup.py --refresh`
+(after inspecting the existing mode) to refresh the Hermes adapter too.
 ```
 
 ## Features
@@ -31,6 +33,9 @@ ask.
 - Session titles and question state mirrored into the active Codex session
 - `/sessions`, `/status N`, and `/start_work N` session control
 - Loopback-only session bridge backed by `codex app-server --stdio`
+- Optional Hermes adapter installed by `scripts/setup.py` when Hermes is available:
+  labeled completion/interruption notifications, a Telegram question tool, and
+  a human approval transport using the same bot (no second polling consumer)
 
 ## Runtime modes
 
@@ -83,6 +88,37 @@ types, making interleaved messages from concurrent sessions easier to distinguis
 The original Markdown remains unchanged for the Codex TUI. A separate Telegram
 copy is converted deterministically to supported Telegram HTML and split at safe
 message boundaries without any additional LLM or model call.
+
+## Hermes integration (when installed)
+
+`setup.py` discovers `hermes` on `PATH`, installs the adapter in the active
+profile's `plugins/codex-telegram-bridge/`, enables it, and selects the
+`codex-telegram` approval transport if the existing transport is `builtin`.
+It does not overwrite another configured transport or start Hermes's own
+Telegram gateway. Approval delivery failure, timeout, or an invalid reply
+**denies** the operation rather than granting it. The plugin reuses the
+configured credential reference and the existing Telegram question receiver;
+only one process polls a bot token. Restart an existing Hermes process after
+installation or update so it loads the refreshed plugin.
+
+Hermes completion and interruption notifications are visibly labeled `Hermes`.
+The `hermes_telegram_ask_user` tool sends choice and free-text questions to
+the plugin's bot and returns the selected answers to Hermes; on delivery
+failure it returns an error telling the agent to use native `clarify`. The
+adapter gives Hermes guidance to use this tool, but it does **not** silently
+intercept every native `clarify` invocation. Hermes dangerous-command approvals
+use its host-owned approval transport and preserve its allowed scopes and safety
+checks. Codex `/sessions`, `/status`, and `/start_work` remain Codex-only.
+
+For subsequent repository updates, refresh both integrations in one step:
+
+```bash
+python3 scripts/setup.py --refresh
+```
+
+Use `--install-services` only when intentionally restarting the applicable
+systemd user services. The refresh reuses the existing mode, credential file,
+and receiver; it never creates a second polling consumer.
 
 ## Security and local data
 
