@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sqlite3
 import sys
+import tempfile
+import types
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest import mock
 
@@ -21,6 +25,25 @@ def load_plugin():
 
 
 class HermesPluginTests(unittest.TestCase):
+    def test_notifications_use_current_profile_session_title(self) -> None:
+        plugin = load_plugin()
+        sent = []
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            with closing(sqlite3.connect(home / "state.db")) as db, db:
+                db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
+                db.execute("INSERT INTO sessions VALUES (?, ?)", ("s1", "  Telegram\n제목 구현  "))
+            constants = types.SimpleNamespace(get_hermes_home=lambda: home)
+            with mock.patch.dict(sys.modules, {"hermes_constants": constants}):
+                adapter = plugin.HermesTelegramAdapter(send=lambda text, title: sent.append((text, title)))
+                adapter.on_response(session_id="s1", turn_id="t1", assistant_response="완료", platform="cli")
+                adapter.on_end(session_id="s1", turn_id="t1", completed=True, platform="cli")
+                with closing(sqlite3.connect(home / "state.db")) as db, db:
+                    db.execute("UPDATE sessions SET title = ?", ("변경된 제목",))
+                adapter.on_end(session_id="s1", turn_id="t2", interrupted=True, platform="cli")
+        self.assertTrue(sent[0][1].endswith("✅ Hermes 완료 · Telegram 제목 구현"))
+        self.assertTrue(sent[1][1].endswith("🚨 Hermes 중단 · 변경된 제목"))
+
     def test_completion_and_interrupt_are_distinct_and_not_duplicated(self) -> None:
         plugin = load_plugin()
         sent = []
@@ -83,6 +106,40 @@ class HermesPluginTests(unittest.TestCase):
         self.assertEqual(result["answers"], [["예"]])
         self.assertEqual(adapter.ask.call_args.kwargs["agent_name"], "Hermes")
         self.assertIn("Hermes", adapter.ask.call_args.kwargs["session_name"])
+
+    def test_question_uses_same_session_title_as_notifications(self) -> None:
+        plugin = load_plugin()
+        adapter = plugin.HermesTelegramAdapter(ask=mock.Mock(return_value=[["예"]]))
+        with mock.patch.object(adapter, "_session_name", return_value="제목 표시 구현") as resolve:
+            result = json.loads(adapter.ask_user({"questions": [{"question": "진행?"}]}, session_id="s1"))
+        self.assertEqual(result["answers"], [["예"]])
+        resolve.assert_called_once_with("s1")
+        self.assertEqual(adapter.ask.call_args.kwargs["session_name"], "제목 표시 구현")
+
+    def test_session_title_missing_database_does_not_create_it(self) -> None:
+        plugin = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            constants = types.SimpleNamespace(get_hermes_home=lambda: home)
+            with mock.patch.dict(sys.modules, {"hermes_constants": constants}):
+                self.assertEqual(plugin.HermesTelegramAdapter._session_name("session-123"), "Hermes · session-")
+                self.assertEqual(plugin.HermesTelegramAdapter._session_name(""), "Hermes")
+            self.assertFalse((home / "state.db").exists())
+
+    def test_session_title_empty_unknown_and_invalid_database_fall_back(self) -> None:
+        plugin = load_plugin()
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            constants = types.SimpleNamespace(get_hermes_home=lambda: home)
+            with closing(sqlite3.connect(home / "state.db")) as db, db:
+                db.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT)")
+                db.executemany("INSERT INTO sessions VALUES (?, ?)", [("empty", " \n "), ("long", "가" * 120)])
+            with mock.patch.dict(sys.modules, {"hermes_constants": constants}):
+                self.assertEqual(plugin.HermesTelegramAdapter._session_name("empty"), "Hermes · empty")
+                self.assertEqual(plugin.HermesTelegramAdapter._session_name("unknown"), "Hermes · unknown")
+                self.assertEqual(plugin.HermesTelegramAdapter._session_name("long"), "가" * 100)
+                (home / "state.db").write_text("not a database")
+                self.assertEqual(plugin.HermesTelegramAdapter._session_name("broken"), "Hermes · broken")
 
     def test_adapter_loads_its_checkout_not_unrelated_common_module(self) -> None:
         plugin = load_plugin()

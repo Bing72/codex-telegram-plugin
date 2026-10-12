@@ -5,9 +5,11 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import sqlite3
 import sys
 import threading
 import uuid
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Callable
 
@@ -68,6 +70,23 @@ class HermesTelegramAdapter:
         # Hermes's own Telegram gateway already delivers its answer there.
         return platform != "telegram"
 
+    @staticmethod
+    def _session_name(session_id: str) -> str:
+        """Read the current profile's title without creating or changing its DB."""
+        fallback = f"Hermes · {session_id[:8]}" if session_id else "Hermes"
+        if not session_id:
+            return fallback
+        try:
+            from hermes_constants import get_hermes_home
+
+            path = (get_hermes_home() / "state.db").resolve()
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.2)) as db:
+                row = db.execute("SELECT title FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            title = " ".join(str(row[0] or "").split()) if row else ""
+            return title[:100] or fallback
+        except (ImportError, OSError, sqlite3.Error):
+            return fallback
+
     def on_response(self, *, session_id: str = "", turn_id: str = "", assistant_response: str = "", platform: str = "", **_kwargs: Any) -> None:
         if not self._local(platform) or not turn_id or not isinstance(assistant_response, str):
             return
@@ -92,10 +111,11 @@ class HermesTelegramAdapter:
         try:
             common = _bridge_common()
             marker = common.session_emoji(session_id)
+            session_name = self._session_name(session_id)
             if interrupted:
-                self.send("현재 Hermes 작업이 중단되었습니다.", f"{marker} 🚨 Hermes 중단")
+                self.send("현재 Hermes 작업이 중단되었습니다.", f"{marker} 🚨 Hermes 중단 · {session_name}")
             elif completed and not failed and response.strip():
-                self.send(response[:3800], f"{marker} ✅ Hermes 완료")
+                self.send(response[:3800], f"{marker} ✅ Hermes 완료 · {session_name}")
         except Exception:
             # A notification never changes the agent's turn outcome.
             return
@@ -123,7 +143,7 @@ class HermesTelegramAdapter:
             answers = self.ask(
                 converted,
                 session_id=session_id,
-                session_name=f"Hermes · {session_id[:8]}",
+                session_name=self._session_name(session_id),
                 server_url=_bridge_common().bridge_url(),
                 timeout_seconds=min(max(int(args.get("timeout_seconds", 3600)), 1), 86400),
                 request_id=f"hermes-question-{uuid.uuid4().hex}",

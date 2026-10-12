@@ -102,6 +102,11 @@ only one process polls a bot token. Restart an existing Hermes process after
 installation or update so it loads the refreshed plugin.
 
 Hermes completion and interruption notifications are visibly labeled `Hermes`.
+Their headings include the current Hermes session title, just like Codex
+notifications (for example, `✅ Hermes 완료 · Telegram 제목 구현`). Questions
+use the same title. The adapter reads it from the active profile's `state.db`
+in read-only mode on each send, so renamed sessions are reflected without a
+model call. If no title is available, it falls back to `Hermes · <session-id>`.
 The `hermes_telegram_ask_user` tool sends choice and free-text questions to
 the plugin's bot and returns the selected answers to Hermes; on delivery
 failure it returns an error telling the agent to use native `clarify`. The
