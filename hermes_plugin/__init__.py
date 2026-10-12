@@ -140,8 +140,7 @@ class HermesTelegramAdapter:
             })
         session_id = str(kwargs.get("session_id") or kwargs.get("task_id") or uuid.uuid4().hex)
         try:
-            answers = self.ask(
-                converted,
+            ask_kwargs = dict(
                 session_id=session_id,
                 session_name=self._session_name(session_id),
                 server_url=_bridge_common().bridge_url(),
@@ -149,9 +148,96 @@ class HermesTelegramAdapter:
                 request_id=f"hermes-question-{uuid.uuid4().hex}",
                 agent_name="Hermes",
             )
+            terminal = self._terminal()
+            if terminal is not None:
+                answers = self._ask_with_terminal(terminal, questions, converted, ask_kwargs)
+            else:
+                answers = self.ask(converted, **ask_kwargs)
             return json.dumps({"answers": answers}, ensure_ascii=False)
         except Exception:
             return json.dumps({"error": "Telegram question unavailable; use Hermes native clarify"})
+
+    @staticmethod
+    def _terminal() -> Any:
+        """Use the current thread's CLI owner, never stdin or a global session."""
+        try:
+            from tools.terminal_tool import _get_approval_callback
+
+            owner = getattr(_get_approval_callback(), "__self__", None)
+            if callable(getattr(owner, "_clarify_callback", None)):
+                return owner
+        except ImportError:
+            pass
+        return None
+
+    def _ask_with_terminal(self, terminal: Any, questions: list, converted: list, ask_kwargs: dict) -> list:
+        normalized = [{
+            "qid": f"q{index}", "question": item["question"],
+            "choices": item.get("choices") or None,
+            "choices_offered": item.get("choices") or None,
+            "multi_select": item.get("multi_select") is True and bool(item.get("choices")),
+        } for index, item in enumerate(questions)]
+        cancel = threading.Event()
+        previous = getattr(terminal, "_clarify_state", None)
+
+        def receive() -> None:
+            # Capture this modal's identity before sending; a late reply must
+            # never resolve a subsequent question in the same CLI.
+            while not cancel.wait(0.01):
+                state = getattr(terminal, "_clarify_state", None)
+                if state is not None and state is not previous:
+                    break
+            else:
+                return
+            try:
+                answers = self.ask(
+                    converted, **ask_kwargs, cancel_event=cancel,
+                    cancel_message="✅ Hermes 터미널에서 답변을 받았습니다.",
+                )
+                if cancel.is_set() or answers is None or len(answers) != len(normalized):
+                    return
+
+                def resolve() -> None:
+                    if cancel.is_set() or getattr(terminal, "_clarify_state", None) is not state:
+                        return
+                    if not state["response_queue"].empty():
+                        return
+                    state["answers"] = {
+                        q["qid"]: (answer if q["multi_select"] else (answer[0] if answer else None))
+                        for q, answer in zip(normalized, answers)
+                    }
+                    terminal._clarify_teardown()
+                    state["response_queue"].put(True)
+
+                if getattr(terminal, "_app", None) is not None:
+                    from hermes_cli.cli_terminal_mixin import _run_on_app_loop
+
+                    _run_on_app_loop(terminal._app, resolve)
+                else:
+                    resolve()
+            except Exception:
+                # Telegram failure does not close the still-answerable CLI UI.
+                return
+
+        worker = threading.Thread(target=receive, daemon=True)
+        worker.start()
+        try:
+            reply = terminal._clarify_callback(normalized)
+            answers = []
+            for question in normalized:
+                value = reply.get("answers", {}).get(question["qid"])
+                if question["multi_select"] and isinstance(value, str):
+                    try:
+                        parsed = json.loads(value)
+                        if isinstance(parsed, list):
+                            value = parsed
+                    except json.JSONDecodeError:
+                        pass
+                answers.append(value if isinstance(value, list) else ([value] if value is not None else []))
+            return answers
+        finally:
+            cancel.set()
+            worker.join(timeout=2)
 
     def approve(self, request: Any) -> Any:
         options = [{"label": _CHOICES[choice]} for choice in request.allowed_choices if choice in _CHOICES]
@@ -181,6 +267,7 @@ class HermesTelegramAdapter:
     def question_guidance(**_kwargs: Any) -> str:
         return (
             "Telegram 질문을 원하면 hermes_telegram_ask_user 도구를 사용하세요. "
+            "대화형 CLI에서는 터미널에서도 선택할 수 있고 먼저 제출된 답변을 사용합니다. "
             "전송에 실패하면 Hermes 기본 clarify를 사용하세요. "
             "위험한 명령의 승인은 도구 질문이 아니라 Hermes 승인 절차를 따르세요."
         )

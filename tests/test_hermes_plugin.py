@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import queue
 import sqlite3
 import sys
 import tempfile
 import types
+import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -25,6 +27,125 @@ def load_plugin():
 
 
 class HermesPluginTests(unittest.TestCase):
+    def test_real_hermes_cli_modal_resolves_from_either_channel(self) -> None:
+        try:
+            from hermes_cli.cli_modal_mixin import CLIModalMixin
+            from tools.terminal_tool import set_approval_callback
+        except ImportError:
+            self.skipTest("Run with hermes --run-module unittest for native CLI integration")
+
+        class Terminal(CLIModalMixin):
+            _app = None
+            _clarify_state = None
+
+            def _approval_callback(self, *args, **kwargs):
+                return "deny"
+
+            def _ring_bell(self, *args, **kwargs):
+                pass
+
+            def _paint_now(self):
+                pass
+
+            def _persist_prompt_summary(self, *args):
+                pass
+
+        for delivery_fails in (False, True):
+            with self.subTest(delivery_fails=delivery_fails):
+                terminal = Terminal()
+                plugin = load_plugin()
+
+                def ask(_questions, **kwargs):
+                    if delivery_fails:
+                        state = terminal._clarify_state
+                        terminal._clarify_batch_lock(state, "터미널 자유 입력")
+                        raise OSError("Telegram unavailable")
+                    return [["A", "B"], ["Telegram 자유 입력"]]
+
+                questions = [{"question": "입력?"}] if delivery_fails else [
+                    {"question": "복수 선택?", "choices": ["A", "B"], "multi_select": True},
+                    {"question": "입력?"},
+                ]
+                set_approval_callback(terminal._approval_callback)
+                try:
+                    adapter = plugin.HermesTelegramAdapter(ask=ask)
+                    self.assertIs(adapter._terminal(), terminal)
+                    result = json.loads(adapter.ask_user({"questions": questions}))
+                finally:
+                    set_approval_callback(None)
+                expected = [["터미널 자유 입력"]] if delivery_fails else [["A", "B"], ["Telegram 자유 입력"]]
+                self.assertEqual(result, {"answers": expected})
+                self.assertIsNone(terminal._clarify_state)
+
+    def test_terminal_multi_select_decodes_native_json_answer(self) -> None:
+        plugin = load_plugin()
+        terminal = mock.Mock()
+        terminal._clarify_callback.return_value = {"answers": {"q0": '["A", "B"]'}, "outcome": "submitted"}
+        adapter = plugin.HermesTelegramAdapter(ask=mock.Mock())
+        with mock.patch.object(adapter, "_terminal", return_value=terminal):
+            result = json.loads(adapter.ask_user({"questions": [{"question": "선택", "choices": ["A", "B"], "multi_select": True}]}))
+        self.assertEqual(result, {"answers": [["A", "B"]]})
+
+    def test_late_telegram_callback_does_not_overwrite_terminal_or_next_modal(self) -> None:
+        plugin = load_plugin()
+        scheduled = threading.Event()
+        callbacks = []
+
+        def schedule(_app, callback):
+            callbacks.append(callback)
+            scheduled.set()
+
+        class Terminal:
+            _app = object()
+            _clarify_state = None
+
+            def _clarify_callback(self, questions):
+                self._clarify_state = {"answers": {}, "response_queue": queue.Queue()}
+                if not scheduled.wait(2):
+                    raise TimeoutError("No Telegram reply")
+                self._clarify_state = {"answers": {"q0": "다음 질문"}}
+                return {"answers": {"q0": "터미널"}, "outcome": "submitted"}
+
+        terminal = Terminal()
+        adapter = plugin.HermesTelegramAdapter(ask=lambda *a, **kw: [["Telegram"]])
+        module = types.SimpleNamespace(_run_on_app_loop=schedule)
+        with mock.patch.object(adapter, "_terminal", return_value=terminal), mock.patch.dict(
+            sys.modules, {"hermes_cli.cli_terminal_mixin": module}
+        ):
+            result = json.loads(adapter.ask_user({"questions": [{"question": "입력?"}]}))
+            callbacks[0]()
+        self.assertEqual(result, {"answers": [["터미널"]]})
+        assert terminal._clarify_state is not None
+        self.assertEqual(terminal._clarify_state["answers"], {"q0": "다음 질문"})
+
+    def test_terminal_answer_cancels_telegram_wait(self) -> None:
+        plugin = load_plugin()
+        local_open = threading.Event()
+        telegram_started = threading.Event()
+        cancelled = threading.Event()
+
+        class Terminal:
+            def _clarify_callback(self, questions):
+                self._clarify_state = {"answers": {}, "response_queue": queue.Queue()}
+                local_open.set()
+                if not telegram_started.wait(1):
+                    raise TimeoutError("Telegram worker did not start")
+                self._clarify_state["answers"] = {"q0": "아니오"}
+                return {"answers": {"q0": "아니오"}, "outcome": "submitted"}
+
+        def ask(_questions, **kwargs):
+            self.assertTrue(local_open.wait(1))
+            telegram_started.set()
+            if kwargs["cancel_event"].wait(1):
+                cancelled.set()
+            return None
+
+        adapter = plugin.HermesTelegramAdapter(ask=ask)
+        with mock.patch.object(adapter, "_terminal", return_value=Terminal()):
+            result = json.loads(adapter.ask_user({"questions": [{"question": "진행?", "choices": ["예", "아니오"]}]}))
+        self.assertEqual(result, {"answers": [["아니오"]]})
+        self.assertTrue(cancelled.is_set())
+
     def test_notifications_use_current_profile_session_title(self) -> None:
         plugin = load_plugin()
         sent = []

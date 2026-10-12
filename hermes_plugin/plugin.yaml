@@ -1,5 +1,5 @@
 name: codex-telegram-bridge
-version: 0.2.1
+version: 0.2.2
 description: Send Hermes notifications, questions, and approvals through the Codex Telegram plugin bot.
 author: Codex Telegram Contributors
 provides_hooks:

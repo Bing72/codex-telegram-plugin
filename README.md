@@ -108,8 +108,13 @@ use the same title. The adapter reads it from the active profile's `state.db`
 in read-only mode on each send, so renamed sessions are reflected without a
 model call. If no title is available, it falls back to `Hermes · <session-id>`.
 The `hermes_telegram_ask_user` tool sends choice and free-text questions to
-the plugin's bot and returns the selected answers to Hermes; on delivery
-failure it returns an error telling the agent to use native `clarify`. The
+the plugin's bot. In an interactive Hermes CLI, it also opens Hermes's native
+terminal question panel: either channel can submit, and the first submission
+wins. Terminal submissions cancel the Telegram wait; Telegram submissions
+close the terminal panel. Multi-select and free-text answers work on both.
+If Telegram delivery fails, the terminal panel remains usable. In contexts
+without an interactive CLI, delivery failure returns an error telling the
+agent to use native `clarify`. The
 adapter gives Hermes guidance to use this tool, but it does **not** silently
 intercept every native `clarify` invocation. Hermes dangerous-command approvals
 use its host-owned approval transport and preserve its allowed scopes and safety
