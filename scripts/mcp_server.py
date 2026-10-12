@@ -84,6 +84,10 @@ TOOL = {
 
 LEGACY_PROTOCOL_VERSION = "2025-06-18"
 ELICITATION_PROTOCOL_VERSION = "2025-11-25"
+LATEST_PROTOCOL_VERSION = "2026-07-28"
+SUPPORTED_PROTOCOL_VERSIONS = {
+    LEGACY_PROTOCOL_VERSION, ELICITATION_PROTOCOL_VERSION, LATEST_PROTOCOL_VERSION
+}
 CUSTOM_CHOICE_PREFIX = "__codex_telegram_custom_"
 _WRITE_LOCK = threading.Lock()
 
@@ -197,7 +201,12 @@ def _client_supports_form_elicitation(params: dict[str, Any]) -> bool:
     if not isinstance(capabilities, dict):
         return False
     elicitation = capabilities.get("elicitation")
-    return isinstance(elicitation, dict) and "form" in elicitation
+    if not isinstance(elicitation, dict):
+        return False
+    version = params.get("protocolVersion")
+    return version in SUPPORTED_PROTOCOL_VERSIONS and (
+        "form" in elicitation or not elicitation
+    )
 
 
 def _initialize_response(
@@ -292,7 +301,12 @@ def _choice_options(question: dict[str, Any], custom_choice: str | None) -> list
     return options
 
 
-def _elicitation_form(questions: list[dict[str, Any]], session_name: str) -> ElicitationForm:
+def _elicitation_form(
+    questions: list[dict[str, Any]],
+    session_name: str,
+    *,
+    protocol_version: str = ELICITATION_PROTOCOL_VERSION,
+) -> ElicitationForm:
     properties: dict[str, Any] = {}
     required: list[str] = []
     mapped: list[ElicitationQuestion] = []
@@ -310,7 +324,15 @@ def _elicitation_form(questions: list[dict[str, Any]], session_name: str) -> Eli
         description = str(question.get("question") or "")
         if labels:
             choices = _choice_options(question, custom_choice)
-            if multiple:
+            if protocol_version == LEGACY_PROTOCOL_VERSION:
+                properties[key] = {
+                    "type": "string",
+                    "title": str(question.get("header") or f"질문 {index}"),
+                    "description": description,
+                    "enum": [choice["const"] for choice in choices],
+                    "enumNames": [choice["title"] for choice in choices],
+                }
+            elif multiple:
                 properties[key] = {
                     "type": "array",
                     "title": str(question.get("header") or f"질문 {index}"),
@@ -351,7 +373,7 @@ def _elicitation_form(questions: list[dict[str, Any]], session_name: str) -> Eli
         )
     return ElicitationForm(
         params={
-            "mode": "form",
+            **({"mode": "form"} if protocol_version != LEGACY_PROTOCOL_VERSION else {}),
             "message": (
                 f"🧵 세션: {session_name}\n\n"
                 "Telegram에도 동일한 질문이 표시됩니다. 먼저 제출된 답변만 사용합니다."
@@ -551,7 +573,9 @@ class McpRuntime:
             self._remove_outbound(request_id)
 
     def _answer_via_both_channels(self, call: AskUserCall) -> tuple[str, list[list[str]]]:
-        form = _elicitation_form(call.questions, call.session_name)
+        form = _elicitation_form(
+            call.questions, call.session_name, protocol_version=self.protocol_version
+        )
         completed: queue.Queue[tuple[str, list[list[str]] | Exception]] = queue.Queue()
         telegram_cancel = threading.Event()
         elicitation_cancel = threading.Event()
@@ -612,7 +636,10 @@ class McpRuntime:
         call: AskUserCall | None = None
         try:
             call = _parse_ask_user_call(request)
-            if not self.supports_elicitation:
+            if not self.supports_elicitation or (
+                self.protocol_version == LEGACY_PROTOCOL_VERSION
+                and any(question.get("multiple") is True for question in call.questions)
+            ):
                 _report_progress(call, progress=0, state="Telegram 답변 대기")
                 answers = _telegram_answers(call)
                 if answers is None:
@@ -658,13 +685,10 @@ class McpRuntime:
         if method == "initialize":
             params = request.get("params")
             params = params if isinstance(params, dict) else {}
-            self.supports_elicitation = (
-                params.get("protocolVersion") == ELICITATION_PROTOCOL_VERSION
-                and _client_supports_form_elicitation(params)
-            )
+            self.supports_elicitation = _client_supports_form_elicitation(params)
             self.protocol_version = (
-                ELICITATION_PROTOCOL_VERSION
-                if self.supports_elicitation
+                params["protocolVersion"]
+                if params.get("protocolVersion") in SUPPORTED_PROTOCOL_VERSIONS
                 else LEGACY_PROTOCOL_VERSION
             )
         if method == "tools/call":

@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -201,6 +202,53 @@ class McpServerTests(unittest.TestCase):
             [["A", "B"], ["명시 요청"]],
         )
 
+    def test_codex_legacy_form_capability_enables_native_questions(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        messages: list[dict[str, object]] = []
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"elicitation": {"form": {}, "url": {}}},
+                "clientInfo": {"name": "codex-mcp-client", "version": "0.162.1"},
+            },
+        }
+        with mock.patch.object(mcp_server, "write_message", side_effect=messages.append):
+            runtime.dispatch(request)
+
+        self.assertTrue(runtime.supports_elicitation)
+        self.assertEqual(messages[0]["result"]["protocolVersion"], "2025-06-18")
+        form = mcp_server._elicitation_form(
+            self._call().questions, "표시 점검 세션", protocol_version=runtime.protocol_version
+        )
+        self.assertNotIn("mode", form.params)
+        choice = form.params["requestedSchema"]["properties"]["question_1"]
+        self.assertEqual(choice["enumNames"], ["보임", "안 보임", "직접 입력"])
+
+    def test_codex_new_protocol_negotiates_form_elicitation(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        messages: list[dict[str, object]] = []
+        with mock.patch.object(mcp_server, "write_message", side_effect=messages.append):
+            runtime.dispatch(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2026-07-28",
+                        "capabilities": {"elicitation": {"form": {}, "url": {}}},
+                    },
+                }
+            )
+        self.assertTrue(runtime.supports_elicitation)
+        self.assertEqual(messages[0]["result"]["protocolVersion"], "2026-07-28")
+        form = mcp_server._elicitation_form(
+            self._call().questions, "표시 점검 세션", protocol_version=runtime.protocol_version
+        )
+        self.assertEqual(form.params["mode"], "form")
+
     def test_runtime_advertises_elicitation_only_after_client_negotiation(self) -> None:
         runtime = mcp_server.McpRuntime()
         messages: list[dict[str, object]] = []
@@ -222,6 +270,34 @@ class McpServerTests(unittest.TestCase):
             mcp_server.ELICITATION_PROTOCOL_VERSION,
         )
         self.assertEqual(messages[0]["result"]["capabilities"]["elicitation"], {"form": {}})
+
+    def test_legacy_multi_select_uses_telegram_without_invalid_native_form(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        runtime.protocol_version = mcp_server.LEGACY_PROTOCOL_VERSION
+        runtime.supports_elicitation = True
+        call = replace(
+            self._call(),
+            questions=mcp_server.normalize_questions(
+                [
+                    {
+                        "header": "선택",
+                        "question": "두 개를 고르세요",
+                        "options": [{"label": "A"}, {"label": "B"}],
+                        "multiple": True,
+                    }
+                ]
+            ),
+        )
+        messages: list[dict[str, object]] = []
+        with (
+            mock.patch.object(mcp_server, "_parse_ask_user_call", return_value=call),
+            mock.patch.object(mcp_server, "_telegram_answers", return_value=[["A", "B"]]),
+            mock.patch.object(runtime, "_answer_via_both_channels") as native,
+            mock.patch.object(mcp_server, "write_message", side_effect=messages.append),
+        ):
+            runtime._handle_ask_user({"id": 7})
+        native.assert_not_called()
+        self.assertEqual(messages[-1]["result"]["structuredContent"], {"answers": [["A", "B"]]})
 
     def test_runtime_accepts_codex_answer_and_cancels_telegram_wait(self) -> None:
         runtime = mcp_server.McpRuntime()

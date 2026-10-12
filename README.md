@@ -55,8 +55,11 @@ While the user is active in the Codex session, agents should prefer Codex's
 native question UI or one concise in-session question. When `ask_user` is
 invoked, clients that negotiate MCP form elicitation receive the same question
 and Telegram receives inline buttons. The first completed answer wins; the
-other channel is closed or cancelled. Clients without elicitation support keep
-the existing Telegram-only fallback.
+other channel is closed or cancelled. The MCP server negotiates the client's
+form-elicitation protocol (2025-06-18, 2025-11-25, or 2026-07-28), using each
+version's choice schema. Multi-select questions on the 2025-06-18 protocol
+remain Telegram-only because that form schema cannot represent multi-select.
+Clients without form elicitation support keep the Telegram-only fallback.
 
 To send selectable Codex questions to Telegram even while the local session is
 open, set `"question_routing": "telegram_choices"` in the local
