@@ -1,0 +1,7 @@
+{
+  "wiki": {
+    "enabled": false,
+    "autoCapture": false,
+    "feedProjectMemoryOnStart": false
+  }
+}

@@ -1,6 +1,6 @@
 ---
 name: codex-telegram
-description: Use the installed Telegram bridge when Codex needs a real user answer, approval, completion notification, or remote session continuation.
+description: Use installed Codex bridge for configured Telegram choice questions, remote replies, notifications, or session resume—not ordinary local-only questions.
 ---
 
 # Codex Telegram
