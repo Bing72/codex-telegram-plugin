@@ -20,13 +20,11 @@ from common import (  # noqa: E402
     is_always_allowed,
     load_runtime_settings,
     permission_fingerprint,
-    register_session,
     remember_always_allowed,
     request_permission,
     resolve_session_name,
     send_codex_notification,
     session_emoji,
-    session_title,
     summarize_tool_input,
 )
 
@@ -65,15 +63,6 @@ def telegram_choice_guidance() -> str | None:
 
 
 def handle_session_start(data: dict[str, Any]) -> None:
-    session_id = str(data.get("session_id") or "")
-    cwd = str(data.get("cwd") or os.getcwd())
-    if session_id:
-        register_session(
-            session_id,
-            title=session_title(cwd, session_id),
-            cwd=cwd,
-            status="idle",
-        )
     question_guidance = telegram_choice_guidance()
     if question_guidance is None:
         question_guidance = (
@@ -102,15 +91,6 @@ def handle_session_start(data: dict[str, Any]) -> None:
 
 
 def handle_user_prompt(data: dict[str, Any]) -> None:
-    session_id = str(data.get("session_id") or "")
-    cwd = str(data.get("cwd") or os.getcwd())
-    if session_id:
-        register_session(
-            session_id,
-            title=session_title(cwd, session_id),
-            cwd=cwd,
-            status="busy",
-        )
     guidance = telegram_choice_guidance()
     if guidance is None:
         emit({})
@@ -130,13 +110,6 @@ def handle_interrupt(data: dict[str, Any]) -> None:
 
     session_id = str(data.get("session_id") or "")
     cwd = str(data.get("cwd") or os.getcwd())
-    if session_id:
-        register_session(
-            session_id,
-            title=session_title(cwd, session_id),
-            cwd=cwd,
-            status="idle",
-        )
     try:
         send_codex_notification(
             "현재 Codex 작업이 중단되었습니다.",
@@ -218,13 +191,6 @@ def handle_permission_request(data: dict[str, Any]) -> None:
 def handle_stop(data: dict[str, Any]) -> None:
     session_id = str(data.get("session_id") or "")
     cwd = str(data.get("cwd") or os.getcwd())
-    if session_id:
-        register_session(
-            session_id,
-            title=session_title(cwd, session_id),
-            cwd=cwd,
-            status="idle",
-        )
     message = data.get("last_assistant_message")
     if isinstance(message, str) and message.strip():
         try:

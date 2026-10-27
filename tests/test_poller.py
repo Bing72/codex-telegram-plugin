@@ -289,6 +289,14 @@ class StandalonePollerTests(unittest.TestCase):
             self.assertEqual(snapshot["entries"][0]["index"], 1)
             self.assertIn("1. ⚪ 테스트 세션", send.call_args.args[1])
 
+    def test_polling_lock_uses_the_codex_temporary_namespace(self) -> None:
+        config = make_config("lock-namespace")
+        lock = poller.PollingLock(config)
+        self.assertEqual(
+            lock.path,
+            Path(tempfile.gettempdir()) / f"codex-telegram-{config.token_hash}.lock",
+        )
+
     def test_token_scoped_lock_allows_only_one_owner(self) -> None:
         config = make_config("lock")
         first = poller.PollingLock(config)

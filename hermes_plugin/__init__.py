@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import sqlite3
 import sys
 import threading
@@ -15,6 +16,7 @@ from typing import Any, Callable
 
 
 _IMPORT_LOCK = threading.Lock()
+_LOG = logging.getLogger(__name__)
 
 
 def _bridge_common():
@@ -139,23 +141,43 @@ class HermesTelegramAdapter:
                 "custom": True,
             })
         session_id = str(kwargs.get("session_id") or kwargs.get("task_id") or uuid.uuid4().hex)
+        stage = "initialization"
         try:
             ask_kwargs = dict(
                 session_id=session_id,
                 session_name=self._session_name(session_id),
-                server_url=_bridge_common().bridge_url(),
                 timeout_seconds=min(max(int(args.get("timeout_seconds", 3600)), 1), 86400),
                 request_id=f"hermes-question-{uuid.uuid4().hex}",
                 agent_name="Hermes",
             )
             terminal = self._terminal()
             if terminal is not None:
+                stage = "terminal"
                 answers = self._ask_with_terminal(terminal, questions, converted, ask_kwargs)
             else:
-                answers = self.ask(converted, **ask_kwargs)
+                stage = "telegram"
+                answers = self.ask(converted, server_url=_bridge_common().bridge_url(), **ask_kwargs)
             return json.dumps({"answers": answers}, ensure_ascii=False)
+        except Exception as exc:
+            return json.dumps(self._question_failure(exc, stage), ensure_ascii=False)
+
+    @staticmethod
+    def _question_failure(exc: Exception, stage: str) -> dict[str, str]:
+        # Only bridge-owned errors have user-facing messages. Arbitrary
+        # exceptions may contain credentials, request bodies, or private data.
+        detail = type(exc).__name__
+        try:
+            common = _bridge_common()
+            if isinstance(exc, common.TelegramBridgeError):
+                detail = " ".join(common.redact_sensitive_text(exc).splitlines())[:500]
         except Exception:
-            return json.dumps({"error": "Telegram question unavailable; use Hermes native clarify"})
+            pass
+        _LOG.warning("Hermes Telegram question failed at %s: %s", stage, detail)
+        return {
+            "error": "Telegram question unavailable; use Hermes native clarify",
+            "stage": stage,
+            "detail": detail,
+        }
 
     @staticmethod
     def _terminal() -> Any:
@@ -191,7 +213,8 @@ class HermesTelegramAdapter:
                 return
             try:
                 answers = self.ask(
-                    converted, **ask_kwargs, cancel_event=cancel,
+                    converted, server_url=_bridge_common().bridge_url(),
+                    **ask_kwargs, cancel_event=cancel,
                     cancel_message="✅ Hermes 터미널에서 답변을 받았습니다.",
                 )
                 if cancel.is_set() or answers is None or len(answers) != len(normalized):
@@ -215,8 +238,9 @@ class HermesTelegramAdapter:
                     _run_on_app_loop(terminal._app, resolve)
                 else:
                     resolve()
-            except Exception:
+            except Exception as exc:
                 # Telegram failure does not close the still-answerable CLI UI.
+                self._question_failure(exc, "telegram")
                 return
 
         worker = threading.Thread(target=receive, daemon=True)

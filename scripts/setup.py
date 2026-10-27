@@ -24,11 +24,8 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from common import (  # noqa: E402
-    DEFAULT_PLUGIN_CONFIG_DIR,
     DEFAULT_PLUGIN_ENV_PATH,
     DEFAULT_SETTINGS_PATH,
-    LEGACY_OPENCODE_CONFIG_DIR,
-    LEGACY_OPENCODE_ENV_PATH,
     TelegramBridgeError,
     _telegram_api,
     load_runtime_settings,
@@ -142,16 +139,15 @@ def write_settings(
     *,
     mode: str,
     env_path: Path,
-    shared_dir: Path,
     receiver: str,
 ) -> None:
     previous = load_runtime_settings()
     payload = dict(previous)
+    payload.pop("shared_dir", None)
     payload.update({
         "version": 1,
         "mode": mode,
         "env_path": str(env_path),
-        "shared_dir": str(shared_dir),
         "receiver": receiver,
         "terminal_mirror": previous.get("terminal_mirror") is not False,
     })
@@ -245,27 +241,6 @@ WantedBy=default.target
 """
 
 
-def opencode_unit(opencode: str, python: str) -> str:
-    return f"""[Unit]
-Description=OpenCode Telegram single polling host
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=%h
-ExecStart={systemd_quote(opencode)} serve --hostname 127.0.0.1 --port 4097
-ExecStartPost={systemd_quote(python)} {systemd_quote(PLUGIN_ROOT / "scripts/warmup.py")}
-Restart=on-failure
-RestartSec=3
-UMask=0077
-NoNewPrivileges=true
-
-[Install]
-WantedBy=default.target
-"""
-
-
 def systemctl(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["systemctl", "--user", *args],
@@ -293,28 +268,14 @@ def install_services(mode: str, receiver: str) -> None:
         poller_unit(python),
         0o644,
     )
-    opencode = shutil.which("opencode")
-    if receiver == "opencode":
-        if not opencode:
-            raise TelegramBridgeError("OpenCode receiver selected but opencode was not found")
-        atomic_write_text(
-            unit_dir / "opencode-telegram-host.service",
-            opencode_unit(opencode, python),
-            0o644,
-        )
-
     systemctl("daemon-reload")
     systemctl("enable", "codex-telegram-bridge.service")
     systemctl("restart", "codex-telegram-bridge.service")
     if mode == "standalone":
-        systemctl("disable", "--now", "opencode-telegram-host.service", check=False)
         systemctl("enable", "codex-telegram-poller.service")
         systemctl("restart", "codex-telegram-poller.service")
     else:
         systemctl("disable", "--now", "codex-telegram-poller.service", check=False)
-        if receiver == "opencode":
-            systemctl("enable", "opencode-telegram-host.service")
-            systemctl("restart", "opencode-telegram-host.service")
 
 
 def validate_config(env_path: Path) -> None:
@@ -346,11 +307,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mode", choices=["shared", "standalone"])
     source = parser.add_mutually_exclusive_group()
     source.add_argument(
-        "--reuse-opencode",
-        action="store_true",
-        help="Reference the existing OpenCode Telegram .env without copying the token.",
-    )
-    source.add_argument(
         "--env-file",
         type=Path,
         help="Reference an existing Telegram .env file.",
@@ -376,9 +332,9 @@ def parse_args() -> argparse.Namespace:
     )
     args = parser.parse_args()
     if args.refresh:
-        if args.mode or args.reuse_opencode or args.env_file or args.configure_token:
+        if args.mode or args.env_file or args.configure_token:
             parser.error("--refresh cannot be combined with --mode or a credential source")
-    elif not args.mode or not (args.reuse_opencode or args.env_file or args.configure_token):
+    elif not args.mode or not (args.env_file or args.configure_token):
         parser.error("initial setup requires --mode and a credential source")
     return args
 
@@ -388,38 +344,28 @@ def main() -> int:
     if args.refresh:
         settings = load_runtime_settings()
         if (
-            settings.get("mode") not in {"shared", "standalone"}
+            (settings.get("mode"), settings.get("receiver")) not in {
+                ("shared", "external"), ("standalone", "standalone"),
+            }
             or not settings.get("env_path")
-            or not settings.get("shared_dir")
-            or settings.get("receiver") not in {"opencode", "external", "standalone"}
         ):
-            raise TelegramBridgeError("No existing Codex Telegram configuration to refresh")
+            raise TelegramBridgeError(
+                "Unsupported or missing receiver configuration. Reconfigure with "
+                "--mode shared --env-file /path/to/telegram.env for an external receiver, "
+                "or --mode standalone --env-file /path/to/telegram.env for standalone polling."
+            )
         mode = settings["mode"]
         env_path = Path(settings["env_path"])
-        shared_dir = Path(settings["shared_dir"])
         receiver = settings["receiver"]
-    elif args.reuse_opencode:
-        mode = args.mode
-        if args.mode != "shared":
-            raise TelegramBridgeError("--reuse-opencode requires --mode shared")
-        env_path = LEGACY_OPENCODE_ENV_PATH
-        shared_dir = LEGACY_OPENCODE_CONFIG_DIR
-        receiver = "opencode"
     elif args.configure_token:
         mode = args.mode
         if args.mode != "standalone":
             raise TelegramBridgeError("--configure-token requires --mode standalone")
         env_path = configure_credentials()
-        shared_dir = DEFAULT_PLUGIN_CONFIG_DIR
         receiver = "standalone"
     else:
         mode = args.mode
         env_path = args.env_file.expanduser().resolve()
-        shared_dir = (
-            LEGACY_OPENCODE_CONFIG_DIR
-            if args.mode == "shared" and env_path == LEGACY_OPENCODE_ENV_PATH
-            else DEFAULT_PLUGIN_CONFIG_DIR
-        )
         receiver = "external" if args.mode == "shared" else "standalone"
 
     if not env_path.is_file():
@@ -429,7 +375,6 @@ def main() -> int:
     write_settings(
         mode=mode,
         env_path=env_path,
-        shared_dir=shared_dir,
         receiver=receiver,
     )
     hermes_enabled = install_hermes()
@@ -442,7 +387,7 @@ def main() -> int:
     print(f"hermes_adapter={'enabled' if hermes_enabled else 'not-installed'}")
     print(f"settings={DEFAULT_SETTINGS_PATH}")
     print(f"credentials={env_path}")
-    print("token_copied=false" if args.reuse_opencode else "token_copied=not-applicable")
+    print("token_copied=not-applicable")
     return 0
 
 

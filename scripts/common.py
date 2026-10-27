@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Shared Telegram/OpenCode compatibility helpers.
+"""Shared Telegram helpers for the Codex and Hermes integrations.
 
-This module deliberately never calls Telegram getUpdates. The already-running
-OpenCode plugin remains the only long-polling consumer for the shared bot token.
+This module deliberately never calls Telegram getUpdates. The polling host
+remains the only long-polling consumer for the configured bot token.
 """
 
 from __future__ import annotations
@@ -33,8 +33,6 @@ from typing import Any, Iterable
 DEFAULT_PLUGIN_CONFIG_DIR = Path.home() / ".config/codex-telegram-plugin"
 DEFAULT_SETTINGS_PATH = DEFAULT_PLUGIN_CONFIG_DIR / "config.json"
 DEFAULT_PLUGIN_ENV_PATH = DEFAULT_PLUGIN_CONFIG_DIR / ".env"
-LEGACY_OPENCODE_CONFIG_DIR = Path.home() / ".config/opencode/telegram-remote"
-LEGACY_OPENCODE_ENV_PATH = LEGACY_OPENCODE_CONFIG_DIR / ".env"
 DEFAULT_DATA_DIR = Path.home() / ".local/share/codex-telegram-plugin"
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 DEFAULT_BRIDGE_PORT = 43991
@@ -182,7 +180,7 @@ def runtime_mode() -> str:
     mode = str(
         os.environ.get("CODEX_TELEGRAM_MODE")
         or settings.get("mode")
-        or ("shared" if LEGACY_OPENCODE_ENV_PATH.is_file() else "standalone")
+        or "standalone"
     ).strip().lower()
     if mode not in {"shared", "standalone"}:
         raise TelegramBridgeError(
@@ -198,22 +196,7 @@ def telegram_env_path() -> Path | None:
         return Path(configured).expanduser()
     if DEFAULT_PLUGIN_ENV_PATH.is_file():
         return DEFAULT_PLUGIN_ENV_PATH
-    if LEGACY_OPENCODE_ENV_PATH.is_file():
-        return LEGACY_OPENCODE_ENV_PATH
     return None
-
-
-def shared_config_dir() -> Path:
-    settings = load_runtime_settings()
-    configured = (
-        os.environ.get("CODEX_TELEGRAM_SHARED_DIR")
-        or settings.get("shared_dir")
-    )
-    if isinstance(configured, str) and configured.strip():
-        return Path(configured).expanduser()
-    if runtime_mode() == "shared" and LEGACY_OPENCODE_CONFIG_DIR.is_dir():
-        return LEGACY_OPENCODE_CONFIG_DIR
-    return DEFAULT_PLUGIN_CONFIG_DIR
 
 
 def terminal_mirror_enabled() -> bool:
@@ -401,6 +384,11 @@ def load_telegram_config(env_path: Path | None = None) -> TelegramConfig:
         or ""
     )
     if not token:
+        if path is not None and not path.is_file():
+            raise TelegramBridgeError(
+                f"Telegram env file not found: {redact_sensitive_text(path)}; "
+                "restore the credential reference or rerun scripts/setup.py with --env-file"
+            )
         raise TelegramBridgeError("TELEGRAM_BOT_TOKEN is not configured")
     if not raw_chat_id:
         raise TelegramBridgeError("TELEGRAM_CHAT_ID is not configured")
@@ -413,7 +401,7 @@ def load_telegram_config(env_path: Path | None = None) -> TelegramConfig:
         raise TelegramBridgeError("TELEGRAM_ALLOWED_USER_IDS must not be empty")
     if chat_id not in allowed:
         # Private chats normally use the user id as chat id. This prevents
-        # accidentally targeting a different room than the OpenCode setup.
+        # accidentally targeting a different room than the authorized user.
         raise TelegramBridgeError(
             "TELEGRAM_CHAT_ID is not present in TELEGRAM_ALLOWED_USER_IDS"
         )
@@ -1046,13 +1034,13 @@ def permission_short_hash(
 
 def pending_question_dir(config: TelegramConfig) -> Path:
     return Path(tempfile.gettempdir()) / (
-        f"opencoder-telegram-pending-questions-{config.token_hash}"
+        f"codex-telegram-pending-questions-{config.token_hash}"
     )
 
 
 def pending_permission_dir(config: TelegramConfig) -> Path:
     return Path(tempfile.gettempdir()) / (
-        f"opencoder-telegram-pending-permissions-{config.token_hash}"
+        f"codex-telegram-pending-permissions-{config.token_hash}"
     )
 
 
@@ -1481,44 +1469,6 @@ def resolve_session_name(
         return normalized_fallback
     title = " ".join(str(session.get("title") or "").split())
     return title[:100] or normalized_fallback
-
-
-def _registry_filename(session_id: str) -> str:
-    encoded = base64.urlsafe_b64encode(session_id.encode("utf-8")).decode("ascii")
-    return encoded.rstrip("=") + ".json"
-
-
-def session_registry_dir(config: TelegramConfig) -> Path:
-    return shared_config_dir() / "session-registry" / config.token_hash
-
-
-def register_session(
-    session_id: str,
-    *,
-    title: str,
-    cwd: str,
-    status: str = "idle",
-    config: TelegramConfig | None = None,
-) -> None:
-    del cwd  # Remote status lookup provides the authoritative cwd.
-    cfg = config or load_telegram_config()
-    normalized_status = status if status in {"idle", "busy", "retry"} else "idle"
-    path = session_registry_dir(cfg) / _registry_filename(session_id)
-    atomic_write_json(
-        path,
-        {
-            "version": 1,
-            "entry": {
-                "sessionId": session_id,
-                "title": title,
-                "parentID": None,
-                "agent": "codex",
-                "status": normalized_status,
-                "serverUrl": bridge_url(),
-                "updatedAt": int(time.time() * 1000),
-            },
-        },
-    )
 
 
 def session_title(cwd: str, session_id: str) -> str:

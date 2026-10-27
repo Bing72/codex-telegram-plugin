@@ -44,8 +44,12 @@ port unless I explicitly ask. On updates, rerun `scripts/setup.py --refresh`
 | `shared` | Existing external Telegram receiver | References an existing credential file; never copies the token into this checkout |
 | `standalone` | Bundled Python `getUpdates` poller | Uses a credential file outside this checkout |
 
-Both receivers use the same token-scoped lock. Only one process can poll a bot
-token at a time.
+Only one process may poll a bot token at a time. Shared mode requires an
+operator-managed receiver that implements this plugin's pending-question and
+permission protocols and uses the loopback bridge for session control. Merely
+sharing credentials does not integrate an arbitrary receiver. Setup does not
+install or manage that receiver.
+Cooperating receivers must use the same token-scoped polling lock.
 
 ## Telegram commands
 
@@ -114,7 +118,11 @@ wins. Terminal submissions cancel the Telegram wait; Telegram submissions
 close the terminal panel. Multi-select and free-text answers work on both.
 If Telegram delivery fails, the terminal panel remains usable. In contexts
 without an interactive CLI, delivery failure returns an error telling the
-agent to use native `clarify`. The
+agent to use native `clarify`, together with the failed stage and safe diagnostic
+details. Failures are also logged without raw unexpected-exception messages.
+A missing configured credential file is reported explicitly; restore its
+reference or rerun setup with the correct `--env-file`. Telegram initialization
+failures do not prevent an interactive terminal panel from opening. The
 adapter gives Hermes guidance to use this tool, but it does **not** silently
 intercept every native `clarify` invocation. Hermes dangerous-command approvals
 use its host-owned approval transport and preserve its allowed scopes and safety
@@ -135,7 +143,11 @@ and receiver; it never creates a second polling consumer.
 - Live credentials, generated services, runtime state, caches, and logs are
   ignored by Git and remain outside the tracked source tree.
 - The bridge accepts only loopback binds and loopback HTTP callback URLs.
-- Pending/session files use mode `0600`; their directories use `0700`.
+- Pending files use mode `0600`; their directories use `0700`.
+- Pending questions and permissions use `codex-telegram-pending-questions-<token_hash>`
+  and `codex-telegram-pending-permissions-<token_hash>` directories under
+  Python's `tempfile.gettempdir()`. The token-scoped polling lock is
+  `codex-telegram-<token_hash>.lock` in the same temporary directory.
 - User-visible Telegram text and default runtime errors pass through a
   credential and private-path redaction boundary.
 - A `/proc` file-descriptor check prevents resuming a rollout already open in

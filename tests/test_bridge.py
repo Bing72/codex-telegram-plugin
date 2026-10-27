@@ -12,7 +12,7 @@ import bridge  # noqa: E402
 
 
 class BridgeMappingTests(unittest.TestCase):
-    def test_message_envelopes_map_codex_items_to_opencode_shape(self) -> None:
+    def test_message_envelopes_map_codex_items_for_telegram_status(self) -> None:
         thread = {
             "turns": [
                 {

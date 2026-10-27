@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OpenCode-compatible HTTP bridge backed by `codex app-server --stdio`."""
+"""Local HTTP bridge backed by `codex app-server --stdio`."""
 
 from __future__ import annotations
 
@@ -31,7 +31,6 @@ from common import (  # noqa: E402
     bridge_url,
     load_telegram_config,
     redact_sensitive_text,
-    register_session,
     request_permission,
     send_codex_notification,
     session_emoji,
@@ -392,13 +391,6 @@ class CodexBridge:
 
     def start(self) -> None:
         self.rpc.start()
-        register_session(
-            "codex-telegram-bridge",
-            title="Codex Telegram Bridge",
-            cwd=str(Path.home()),
-            status="idle",
-            config=self.config,
-        )
 
     def list_threads(self) -> list[dict[str, Any]]:
         result = self.rpc.request("thread/list", {"limit": 100}, timeout=60)

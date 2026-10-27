@@ -12,6 +12,7 @@ import signal
 import socket
 import stat
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -55,10 +56,10 @@ COMMAND_RE = re.compile(r"^/([a-z_]+)(?:@[A-Za-z0-9_]+)?(?:\s+(.*))?$")
 
 
 class PollingLock:
-    """Uses the same lock name/protocol as the OpenCode Telegram adapter."""
+    """Keep a single polling host for each configured bot token."""
 
     def __init__(self, config: TelegramConfig) -> None:
-        self.path = Path("/tmp") / f"opencoder-telegram-{config.token_hash}.lock"
+        self.path = Path(tempfile.gettempdir()) / f"codex-telegram-{config.token_hash}.lock"
         self.owned = False
 
     def _existing_is_live(self) -> bool:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import queue
 import sqlite3
 import sys
@@ -27,6 +28,53 @@ def load_plugin():
 
 
 class HermesPluginTests(unittest.TestCase):
+    def test_missing_credentials_return_actionable_diagnostics(self) -> None:
+        plugin = load_plugin()
+        common = plugin._bridge_common()
+        adapter = plugin.HermesTelegramAdapter()
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                mock.patch.dict(os.environ, {}, clear=True),
+                mock.patch.object(common, "telegram_env_path", return_value=Path(directory) / "missing.env"),
+                mock.patch.object(adapter, "_terminal", return_value=None),
+                self.assertLogs(plugin.__name__, level="WARNING") as logs,
+            ):
+                result = json.loads(adapter.ask_user({"questions": [{"question": "진행?"}]}))
+        self.assertIn("use Hermes native clarify", result["error"])
+        self.assertIn("Telegram env file not found", result["detail"])
+        self.assertEqual(result["stage"], "telegram")
+        self.assertIn("Telegram env file not found", logs.output[0])
+
+    def test_telegram_initialization_failure_keeps_terminal_usable(self) -> None:
+        plugin = load_plugin()
+        common = plugin._bridge_common()
+        attempted = threading.Event()
+
+        def broken_url():
+            attempted.set()
+            raise RuntimeError("private initialization details")
+
+        class Terminal:
+            _clarify_state = None
+
+            def _clarify_callback(self, questions):
+                self._clarify_state = {"answers": {}, "response_queue": queue.Queue()}
+                if not attempted.wait(1):
+                    raise TimeoutError("Telegram worker did not start")
+                return {"answers": {"q0": "터미널 답변"}, "outcome": "submitted"}
+
+        adapter = plugin.HermesTelegramAdapter(ask=mock.Mock())
+        with (
+            mock.patch.object(common, "bridge_url", side_effect=broken_url),
+            mock.patch.object(adapter, "_terminal", return_value=Terminal()),
+            self.assertLogs(plugin.__name__, level="WARNING") as logs,
+        ):
+            result = json.loads(adapter.ask_user({"questions": [{"question": "진행?"}]}))
+        self.assertEqual(result, {"answers": [["터미널 답변"]]})
+        self.assertIn("telegram", logs.output[0])
+        self.assertNotIn("private initialization details", " ".join(logs.output))
+        adapter.ask.assert_not_called()
+
     def test_real_hermes_cli_modal_resolves_from_either_channel(self) -> None:
         try:
             from hermes_cli.cli_modal_mixin import CLIModalMixin
@@ -50,19 +98,27 @@ class HermesPluginTests(unittest.TestCase):
             def _persist_prompt_summary(self, *args):
                 pass
 
-        for delivery_fails in (False, True):
-            with self.subTest(delivery_fails=delivery_fails):
+        for failure_at in (None, "delivery", "initialization"):
+            with self.subTest(failure_at=failure_at):
                 terminal = Terminal()
                 plugin = load_plugin()
+                common = plugin._bridge_common()
+                original_url = common.bridge_url
+
+                def bridge_url():
+                    if failure_at == "initialization":
+                        terminal._clarify_batch_lock(terminal._clarify_state, "터미널 자유 입력")
+                        raise RuntimeError("Telegram initialization unavailable")
+                    return original_url()
 
                 def ask(_questions, **kwargs):
-                    if delivery_fails:
+                    if failure_at == "delivery":
                         state = terminal._clarify_state
                         terminal._clarify_batch_lock(state, "터미널 자유 입력")
                         raise OSError("Telegram unavailable")
                     return [["A", "B"], ["Telegram 자유 입력"]]
 
-                questions = [{"question": "입력?"}] if delivery_fails else [
+                questions = [{"question": "입력?"}] if failure_at else [
                     {"question": "복수 선택?", "choices": ["A", "B"], "multi_select": True},
                     {"question": "입력?"},
                 ]
@@ -70,10 +126,11 @@ class HermesPluginTests(unittest.TestCase):
                 try:
                     adapter = plugin.HermesTelegramAdapter(ask=ask)
                     self.assertIs(adapter._terminal(), terminal)
-                    result = json.loads(adapter.ask_user({"questions": questions}))
+                    with mock.patch.object(common, "bridge_url", side_effect=bridge_url):
+                        result = json.loads(adapter.ask_user({"questions": questions}))
                 finally:
                     set_approval_callback(None)
-                expected = [["터미널 자유 입력"]] if delivery_fails else [["A", "B"], ["Telegram 자유 입력"]]
+                expected = [["터미널 자유 입력"]] if failure_at else [["A", "B"], ["Telegram 자유 입력"]]
                 self.assertEqual(result, {"answers": expected})
                 self.assertIsNone(terminal._clarify_state)
 

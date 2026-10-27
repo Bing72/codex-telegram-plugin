@@ -17,6 +17,36 @@ import setup  # noqa: E402
 
 
 class SetupTests(unittest.TestCase):
+    def test_manifest_only_advertises_supported_integrations(self) -> None:
+        manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
+        self.assertNotIn("opencode", json.dumps(manifest).lower())
+        self.assertIn("standalone", manifest["description"])
+
+    def test_removed_credential_source_is_rejected(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["setup.py", "--mode", "shared", "--reuse-opencode"]),
+            mock.patch("sys.stderr"),
+            self.assertRaises(SystemExit) as error,
+        ):
+            setup.parse_args()
+        self.assertEqual(error.exception.code, 2)
+
+    def test_shared_env_file_has_no_legacy_runtime_directory(self) -> None:
+        env_path = Path.home() / ".config/opencode/telegram-remote/.env"
+        with (
+            mock.patch.object(sys, "argv", ["setup.py", "--mode", "shared", "--env-file", str(env_path)]),
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(setup, "validate_config"),
+            mock.patch.object(setup, "install_launchers"),
+            mock.patch.object(setup, "write_settings") as write,
+            mock.patch.object(setup, "install_hermes", return_value=False),
+        ):
+            self.assertEqual(setup.main(), 0)
+        write.assert_called_once_with(
+            mode="shared", env_path=env_path.resolve(),
+            receiver="external",
+        )
+
     def test_write_settings_preserves_telegram_choice_routing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -31,8 +61,7 @@ class SetupTests(unittest.TestCase):
                 setup.write_settings(
                     mode="shared",
                     env_path=Path(directory) / ".env",
-                    shared_dir=Path(directory),
-                    receiver="opencode",
+                    receiver="external",
                 )
 
             self.assertEqual(
@@ -49,7 +78,7 @@ class SetupTests(unittest.TestCase):
             ):
                 setup.write_settings(
                     mode="shared", env_path=Path(directory) / "x.env",
-                    shared_dir=Path(directory), receiver="external",
+                    receiver="external",
                 )
             self.assertEqual(json.loads(path.read_text())["custom_toggle"], "keep")
 
@@ -62,9 +91,38 @@ class SetupTests(unittest.TestCase):
             ):
                 setup.write_settings(
                     mode="standalone", env_path=Path(directory) / "x.env",
-                    shared_dir=Path(directory), receiver="standalone",
+                    receiver="standalone",
                 )
             self.assertFalse(json.loads(path.read_text())["terminal_mirror"])
+
+    def test_services_only_manage_codex_units(self) -> None:
+        for mode, receiver in [("shared", "external"), ("standalone", "standalone")]:
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                with (
+                    mock.patch.object(Path, "home", return_value=Path(directory)),
+                    mock.patch.object(setup.shutil, "which", side_effect=lambda name: f"/bin/{name}") as which,
+                    mock.patch.object(setup, "systemctl") as systemctl,
+                ):
+                    setup.install_services(mode, receiver)
+                self.assertEqual(which.call_args_list, [mock.call("python3"), mock.call("codex")])
+                units = Path(directory) / ".config/systemd/user"
+                self.assertEqual({path.name for path in units.iterdir()}, {
+                    "codex-telegram-bridge.service", "codex-telegram-poller.service",
+                })
+                expected = [
+                    mock.call("daemon-reload"),
+                    mock.call("enable", "codex-telegram-bridge.service"),
+                    mock.call("restart", "codex-telegram-bridge.service"),
+                ]
+                if mode == "standalone":
+                    expected.extend([
+                        mock.call("enable", "codex-telegram-poller.service"),
+                        mock.call("restart", "codex-telegram-poller.service"),
+                    ])
+                else:
+                    expected.append(mock.call("disable", "--now", "codex-telegram-poller.service", check=False))
+                self.assertEqual(systemctl.call_args_list, expected)
+        self.assertFalse(hasattr(setup, "opencode_unit"))
 
     def test_install_hermes_enables_adapter_without_replacing_other_config(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -136,7 +194,7 @@ class SetupTests(unittest.TestCase):
     def test_refresh_reapplies_hermes_without_changing_receiver(self) -> None:
         existing = {
             "mode": "shared", "env_path": "/credentials/existing.env",
-            "shared_dir": "/shared", "receiver": "external",
+            "receiver": "external",
         }
         with (
             mock.patch.object(sys, "argv", ["setup.py", "--refresh"]),
@@ -151,10 +209,63 @@ class SetupTests(unittest.TestCase):
             self.assertEqual(setup.main(), 0)
         write.assert_called_once_with(
             mode="shared", env_path=Path(existing["env_path"]),
-            shared_dir=Path("/shared"), receiver="external",
+            receiver="external",
         )
         hermes.assert_called_once()
         services.assert_not_called()
+
+    def test_refresh_rejects_unsupported_pairs_before_credentials_or_writes(self) -> None:
+        for mode, receiver in [
+            ("shared", "opencode"), ("standalone", "opencode"),
+            ("shared", "standalone"), ("standalone", "external"),
+            ("unknown", "external"), ("shared", "unknown"),
+        ]:
+            with (
+                self.subTest(mode=mode, receiver=receiver),
+                mock.patch.object(sys, "argv", ["setup.py", "--refresh", "--install-services"]),
+                mock.patch.object(setup, "load_runtime_settings", return_value={
+                    "mode": mode, "receiver": receiver, "env_path": "/not-read.env",
+                }),
+                mock.patch.object(Path, "is_file") as exists,
+                mock.patch.object(setup, "validate_config") as validate,
+                mock.patch.object(setup, "install_launchers") as launchers,
+                mock.patch.object(setup, "write_settings") as write,
+                mock.patch.object(setup, "install_hermes") as hermes,
+                mock.patch.object(setup, "install_services") as services,
+            ):
+                with self.assertRaisesRegex(common.TelegramBridgeError, "[Rr]econfigure.*--mode.*--env-file"):
+                    setup.main()
+                for boundary in (exists, validate, launchers, write, hermes, services):
+                    boundary.assert_not_called()
+
+    def test_refresh_standalone_without_shared_directory(self) -> None:
+        with (
+            mock.patch.object(sys, "argv", ["setup.py", "--refresh"]),
+            mock.patch.object(setup, "load_runtime_settings", return_value={
+                "mode": "standalone", "receiver": "standalone", "env_path": "/fixture.env",
+            }),
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(setup, "validate_config"),
+            mock.patch.object(setup, "install_launchers"),
+            mock.patch.object(setup, "write_settings") as write,
+            mock.patch.object(setup, "install_hermes", return_value=False),
+        ):
+            self.assertEqual(setup.main(), 0)
+        write.assert_called_once_with(mode="standalone", env_path=Path("/fixture.env"), receiver="standalone")
+
+    def test_write_settings_drops_obsolete_shared_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            with (
+                mock.patch.object(setup, "DEFAULT_SETTINGS_PATH", path),
+                mock.patch.object(setup, "load_runtime_settings", return_value={
+                    "shared_dir": "/obsolete", "custom_toggle": "keep",
+                }),
+            ):
+                setup.write_settings(mode="shared", env_path=Path(directory) / "x.env", receiver="external")
+            payload = json.loads(path.read_text())
+            self.assertNotIn("shared_dir", payload)
+            self.assertEqual(payload["custom_toggle"], "keep")
 
     def test_validate_config_rejects_group_readable_credentials(self) -> None:
         if os.name == "nt":

@@ -103,6 +103,13 @@ Add `--install-services` only when a systemd user-service restart is intended.
 New Hermes/Codex processes load the updated plugin; restart a live Hermes
 gateway only after confirming that interruption is acceptable.
 
+`--refresh` preserves a supported receiver configuration; it does not repair
+missing credentials or migrate a retired receiver. If it reports an unsupported
+receiver, reconfigure with `--mode standalone --env-file /path/to/telegram.env`
+(or `--configure-token` for secure local input). Stop any previous polling owner
+before enabling the bundled poller. The credential file must actually exist;
+never supply a token in an agent chat or commit it to this repository.
+
 ## Choose a runtime mode
 
 | Mode | Use when | Telegram receiver |
@@ -127,6 +134,12 @@ python3 scripts/setup.py \
 
 Shared mode enables the Codex bridge and disables the bundled standalone
 poller. The external receiver remains operator-managed.
+
+The receiver must already implement this plugin's pending-question and permission
+protocols and use the loopback bridge for session control. Referencing its
+credential file does not add these capabilities, and setup does not install,
+initialize, or manage the external receiver. If no compatible receiver is
+available, use standalone mode.
 
 ## Standalone mode
 
@@ -197,7 +210,6 @@ Optional paths and runtime settings:
 ```text
 CODEX_TELEGRAM_CONFIG
 CODEX_TELEGRAM_ENV
-CODEX_TELEGRAM_SHARED_DIR
 CODEX_TELEGRAM_DATA_DIR
 CODEX_TELEGRAM_BRIDGE_HOST
 CODEX_TELEGRAM_BRIDGE_PORT
@@ -206,6 +218,14 @@ CODEX_TELEGRAM_TERMINAL_MIRROR
 
 Set `CODEX_TELEGRAM_TERMINAL_MIRROR=0` for a headless process that should not
 write terminal mirror events.
+
+Cooperating shared receivers must use the same runtime paths as the plugin:
+pending questions and permissions are stored under Python's
+`tempfile.gettempdir()` in `codex-telegram-pending-questions-<token_hash>` and
+`codex-telegram-pending-permissions-<token_hash>` directories. The polling lock
+is `codex-telegram-<token_hash>.lock` in the same temporary directory, not a
+hardcoded OS-specific path. Session control goes directly through the loopback
+bridge; no shared session registry is required.
 
 ## Verification
 

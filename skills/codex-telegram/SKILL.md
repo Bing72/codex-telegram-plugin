@@ -23,7 +23,12 @@ description: Use installed Codex bridge for configured Telegram choice questions
    app-server bridge. Never create a second polling consumer for the same bot.
 5. `/sessions`, `/status N`, and `/start_work N` are served by the configured
    receiver: an external Telegram receiver in shared mode or the bundled
-   poller in standalone mode.
+   poller in standalone mode. Shared mode requires an operator-managed receiver
+   implementing this plugin's question and permission protocols and using the
+   loopback bridge for session control; a credential-file reference alone does
+   not provide integration.
+   Setup does not install or manage the external receiver. Use standalone mode
+   when no compatible receiver is available.
 6. `ask_user` publishes its pending question through MCP progress and, when
    the client negotiates MCP form elicitation, shows the same selectable form
    in Codex and Telegram. The first completed answer is authoritative and the

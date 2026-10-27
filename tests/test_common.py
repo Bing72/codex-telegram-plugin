@@ -564,7 +564,19 @@ class CommonTests(unittest.TestCase):
         ):
             self.assertFalse(common.terminal_mirror_enabled())
 
-    def test_hashes_match_opencode_shapes(self) -> None:
+    def test_pending_paths_use_the_codex_namespace(self) -> None:
+        config = make_config("pending-namespace")
+        root = Path(tempfile.gettempdir())
+        self.assertEqual(
+            common.pending_question_dir(config),
+            root / f"codex-telegram-pending-questions-{config.token_hash}",
+        )
+        self.assertEqual(
+            common.pending_permission_dir(config),
+            root / f"codex-telegram-pending-permissions-{config.token_hash}",
+        )
+
+    def test_callback_hashes_are_stable(self) -> None:
         self.assertEqual(
             common.question_short_hash("request", "session", "http://127.0.0.1:1/"),
             "RG-wFmrper",
@@ -835,26 +847,14 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(list(pending_dir.glob("*.json")), [])
         pending_dir.rmdir()
 
-    def test_register_session_writes_opencode_registry_shape_and_modes(self) -> None:
-        config = make_config("registry")
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            with mock.patch.object(common, "shared_config_dir", return_value=root):
-                common.register_session(
-                    "thread-registry",
-                    title="Codex test",
-                    cwd="/tmp",
-                    status="busy",
-                    config=config,
-                )
-                files = list(root.rglob("*.json"))
-                self.assertEqual(len(files), 1)
-                payload = json.loads(files[0].read_text())
-                self.assertEqual(payload["version"], 1)
-                self.assertEqual(payload["entry"]["agent"], "codex")
-                self.assertEqual(payload["entry"]["status"], "busy")
-                self.assertEqual(os.stat(files[0]).st_mode & 0o777, 0o600)
-                self.assertEqual(os.stat(files[0].parent).st_mode & 0o777, 0o700)
+    def test_runtime_defaults_do_not_discover_external_configuration(self) -> None:
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(common, "load_runtime_settings", return_value={}),
+            mock.patch.object(Path, "is_file", lambda path: path != common.DEFAULT_PLUGIN_ENV_PATH),
+        ):
+            self.assertEqual(common.runtime_mode(), "standalone")
+            self.assertIsNone(common.telegram_env_path())
 
     def test_environment_only_credentials_do_not_require_an_env_file(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -872,6 +872,13 @@ class CommonTests(unittest.TestCase):
         self.assertEqual(config.bot_token, "123456:environment-only")
         self.assertEqual(config.chat_id, 42)
         self.assertEqual(config.env_path, missing)
+
+    def test_missing_credential_reference_reports_the_missing_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.env"
+            with mock.patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(common.TelegramBridgeError, "Telegram env file not found"):
+                    common.load_telegram_config(missing)
 
     def test_runtime_config_requires_an_explicit_allowlist(self) -> None:
         with mock.patch.dict(
@@ -927,27 +934,6 @@ class CommonTests(unittest.TestCase):
                 common.atomic_write_json(path, payload)
                 self.assertIsNone(common.read_pending_json(path))
                 self.assertFalse(path.exists())
-
-    def test_runtime_settings_select_standalone_shared_directory(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            settings = root / "config.json"
-            shared = root / "shared"
-            common.atomic_write_json(
-                settings,
-                {
-                    "mode": "standalone",
-                    "env_path": str(root / ".env"),
-                    "shared_dir": str(shared),
-                },
-            )
-            with mock.patch.dict(
-                os.environ,
-                {"CODEX_TELEGRAM_CONFIG": str(settings)},
-                clear=False,
-            ):
-                self.assertEqual(common.runtime_mode(), "standalone")
-                self.assertEqual(common.shared_config_dir(), shared)
 
 
 if __name__ == "__main__":

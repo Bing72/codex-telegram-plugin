@@ -13,6 +13,19 @@ import hook  # noqa: E402
 
 
 class HookOutputTests(unittest.TestCase):
+    def test_lifecycle_guidance_does_not_load_telegram_credentials(self) -> None:
+        with (
+            mock.patch("common.load_telegram_config", side_effect=AssertionError("No session registry needed")) as load,
+            mock.patch.object(hook, "load_runtime_settings", return_value={}),
+            mock.patch.object(hook, "emit") as emit,
+        ):
+            hook.handle_session_start({"session_id": "session-1", "cwd": "/workspace"})
+            hook.handle_user_prompt({"session_id": "session-1", "cwd": "/workspace"})
+        load.assert_not_called()
+        self.assertEqual(emit.call_count, 2)
+        self.assertEqual(emit.call_args_list[0].args[0]["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertEqual(emit.call_args_list[1].args[0], {})
+
     def test_completion_session_name_uses_bridge_session_title(self) -> None:
         with (
             mock.patch.object(
@@ -54,7 +67,6 @@ class HookOutputTests(unittest.TestCase):
     def test_session_start_prefers_native_questions_before_telegram(self) -> None:
         emitted: list[dict[str, object]] = []
         with (
-            mock.patch.object(hook, "register_session"),
             mock.patch.object(hook, "load_runtime_settings", return_value={}),
             mock.patch.object(hook, "emit", side_effect=emitted.append),
         ):
@@ -69,7 +81,6 @@ class HookOutputTests(unittest.TestCase):
     def test_session_start_routes_choice_questions_to_telegram_when_configured(self) -> None:
         emitted: list[dict[str, object]] = []
         with (
-            mock.patch.object(hook, "register_session"),
             mock.patch.object(
                 hook,
                 "load_runtime_settings",
@@ -88,7 +99,6 @@ class HookOutputTests(unittest.TestCase):
     def test_existing_session_gets_choice_routing_on_next_user_prompt(self) -> None:
         emitted: list[dict[str, object]] = []
         with (
-            mock.patch.object(hook, "register_session"),
             mock.patch.object(
                 hook,
                 "load_runtime_settings",
@@ -104,7 +114,6 @@ class HookOutputTests(unittest.TestCase):
 
     def test_unconfigured_user_prompt_does_not_add_context(self) -> None:
         with (
-            mock.patch.object(hook, "register_session"),
             mock.patch.object(hook, "load_runtime_settings", return_value={}),
             mock.patch.object(hook, "emit") as emit,
         ):
@@ -129,7 +138,6 @@ class HookOutputTests(unittest.TestCase):
 
     def test_completion_uses_the_same_session_emoji(self) -> None:
         with (
-            mock.patch.object(hook, "register_session"),
             mock.patch.object(hook, "completion_session_name", return_value="작업 세션"),
             mock.patch.object(hook, "session_emoji", return_value="🦊") as emoji,
             mock.patch.object(hook, "send_codex_notification") as send,
@@ -151,7 +159,6 @@ class HookOutputTests(unittest.TestCase):
 
     def test_interrupt_sends_emergency_notification(self) -> None:
         with (
-            mock.patch.object(hook, "register_session") as register,
             mock.patch.object(hook, "completion_session_name", return_value="작업 세션"),
             mock.patch.object(hook, "session_emoji", return_value="🦊"),
             mock.patch.object(hook, "send_codex_notification") as send,
@@ -159,12 +166,6 @@ class HookOutputTests(unittest.TestCase):
         ):
             hook.handle_interrupt({"session_id": "session-1", "cwd": "/workspace/project"})
 
-        register.assert_called_once_with(
-            "session-1",
-            title=mock.ANY,
-            cwd="/workspace/project",
-            status="idle",
-        )
         send.assert_called_once_with(
             "현재 Codex 작업이 중단되었습니다.",
             title="🦊 🚨 Codex 중단 · 작업 세션",
