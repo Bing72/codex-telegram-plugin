@@ -132,6 +132,26 @@ class TelegramBridgeError(RuntimeError):
     """Raised when the local Telegram bridge cannot complete a request."""
 
 
+class RequestBodyTooLarge(ValueError):
+    """Raised when a local HTTP request exceeds its accepted body limit."""
+
+
+def read_bounded_json_body(handler: BaseHTTPRequestHandler, limit: int = 65536) -> Any:
+    """Read exactly one bounded JSON body and reject ambiguous lengths."""
+    raw_length = handler.headers.get("Content-Length")
+    if raw_length is None:
+        raise ValueError("missing Content-Length")
+    try:
+        length = int(raw_length)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid Content-Length") from exc
+    if length < 0:
+        raise ValueError("negative Content-Length")
+    if length > limit:
+        raise RequestBodyTooLarge("request body exceeds limit")
+    return json.loads(handler.rfile.read(length).decode("utf-8"))
+
+
 @dataclass(frozen=True)
 class TelegramConfig:
     bot_token: str
@@ -1296,13 +1316,15 @@ class _PermissionReplyHandler(BaseHTTPRequestHandler):
             self.send_error(404)
             return
         try:
-            length = min(int(self.headers.get("Content-Length", "0")), 65536)
-            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            body = read_bounded_json_body(self)
             reply = body.get("reply")
             if reply not in {"once", "always", "reject"}:
                 raise ValueError("invalid reply")
             server.replies.put_nowait(reply)
-        except (ValueError, json.JSONDecodeError, queue.Full):
+        except RequestBodyTooLarge:
+            self.send_error(413)
+            return
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError, queue.Full):
             self.send_error(400)
             return
         encoded = b'{"ok":true}'

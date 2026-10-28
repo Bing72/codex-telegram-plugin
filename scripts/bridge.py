@@ -30,7 +30,9 @@ from common import (  # noqa: E402
     ask_questions,
     bridge_url,
     load_telegram_config,
+    read_bounded_json_body,
     redact_sensitive_text,
+    RequestBodyTooLarge,
     request_permission,
     send_codex_notification,
     session_emoji,
@@ -774,15 +776,16 @@ class BridgeRequestHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
         try:
-            length = min(int(self.headers.get("Content-Length", "0")), 65536)
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            payload = read_bounded_json_body(self)
             if not isinstance(payload, dict) or payload.get("command") != "start-work":
                 self._json(400, {"error": "unsupported command"})
                 return
             thread_id = urllib.parse.unquote(match.group(1))
             self.bridge.start_work(thread_id)
             self._json(202, {"ok": True})
-        except json.JSONDecodeError:
+        except RequestBodyTooLarge:
+            self._json(413, {"error": "request body too large"})
+        except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
             self._json(400, {"error": "invalid JSON"})
         except (RpcError, TelegramBridgeError) as exc:
             self._json(409, {"error": redact_sensitive_text(exc)})

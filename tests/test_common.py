@@ -73,6 +73,31 @@ def make_config(label: str) -> common.TelegramConfig:
 
 
 class CommonTests(unittest.TestCase):
+    def test_bounded_json_body_rejects_negative_and_oversized_lengths(self) -> None:
+        handler = mock.Mock()
+        handler.rfile = io.BytesIO(b'{}')
+
+        for length in ("-1", "65537", "not-a-number"):
+            with self.subTest(length=length):
+                handler.headers = {"Content-Length": length}
+                error = (
+                    common.RequestBodyTooLarge
+                    if length == "65537"
+                    else ValueError
+                )
+                with self.assertRaises(error):
+                    common.read_bounded_json_body(handler)
+
+    def test_bounded_json_body_reads_valid_payload(self) -> None:
+        payload = b'{"command":"start-work"}'
+        handler = mock.Mock()
+        handler.headers = {"Content-Length": str(len(payload))}
+        handler.rfile = io.BytesIO(payload)
+        self.assertEqual(
+            common.read_bounded_json_body(handler),
+            {"command": "start-work"},
+        )
+
     def test_codex_markdown_formats_headings_and_lists_for_telegram(self) -> None:
         formatted = common.format_codex_markdown_for_telegram(
             "# 결과\n\n- 첫째\n- 둘째"
