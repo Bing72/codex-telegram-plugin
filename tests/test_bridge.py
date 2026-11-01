@@ -113,12 +113,39 @@ class BridgeMappingTests(unittest.TestCase):
         self.assertEqual(result, {"answers": {"confirm": {"answers": ["예"]}}})
         self.assertEqual(ask.call_args.kwargs["session_name"], "Cached session title")
 
+    def test_subagent_completion_notifications_are_suppressed(self) -> None:
+        for metadata in (
+            {"parentThreadId": "parent"},
+            {"parentThreadId": None, "source": {"subAgent": "review"}},
+            {"source": {"subAgent": {"thread_spawn": {"parent_thread_id": "parent", "depth": 1}}}},
+            {"source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent", "depth": 1}}}},
+            {"source": {"subAgent": {"other": "guardian"}}},
+        ):
+            with self.subTest(metadata=metadata), mock.patch.object(bridge, "load_telegram_config", return_value=mock.Mock()):
+                service = bridge.CodexBridge()
+                service.get_thread = mock.Mock(return_value={"id": "child", **metadata})
+                with mock.patch.object(bridge, "send_codex_notification") as send:
+                    service._notify_completion("child", "하위 작업 완료")
+                send.assert_not_called()
+
+    def test_session_list_excludes_subagents_even_without_parent_id(self) -> None:
+        with mock.patch.object(bridge, "load_telegram_config", return_value=mock.Mock()):
+            service = bridge.CodexBridge()
+        root = {"id": "root", "source": "cli", "forkedFromId": "older-root"}
+        service.rpc.request = mock.Mock(return_value={"data": [
+            root,
+            {"id": "child", "parentThreadId": "root"},
+            {"id": "review", "source": {"subAgent": "review"}},
+            {"id": "guardian", "source": {"subagent": {"other": "guardian"}}},
+        ]})
+        self.assertEqual(service.list_threads(), [root])
+
     def test_completion_notification_uses_session_emoji(self) -> None:
         config = mock.Mock()
         with mock.patch.object(bridge, "load_telegram_config", return_value=config):
             service = bridge.CodexBridge()
         service.get_thread = mock.Mock(
-            return_value={"id": "thread-1", "name": "작업 세션"}
+            return_value={"id": "thread-1", "name": "작업 세션", "forkedFromId": "older-root", "source": "cli"}
         )
 
         with (

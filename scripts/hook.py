@@ -18,6 +18,7 @@ from common import (  # noqa: E402
     bridge_url,
     clear_session_permissions,
     is_always_allowed,
+    is_codex_subagent,
     load_runtime_settings,
     permission_fingerprint,
     remember_always_allowed,
@@ -59,6 +60,8 @@ def telegram_choice_guidance() -> str | None:
         "codex-telegram MCP의 ask_user 도구로 보내 Telegram에도 표시하세요. "
         "ask_user를 사용할 수 없거나 전송에 실패하면 Codex native 질문 UI로 "
         "되돌아가세요. 자유 입력 질문은 현재 세션의 native 질문 UI를 우선 사용하세요. "
+        "request_user_input 또는 request_user_input_async로 묻는 선택지 질문에도 "
+        "같은 Telegram 우선 규칙을 적용하세요. "
     )
 
 
@@ -188,7 +191,29 @@ def handle_permission_request(data: dict[str, Any]) -> None:
     )
 
 
+def is_subagent_stop(data: dict[str, Any]) -> bool:
+    if data.get("agent_id") or data.get("hook_event_name") == "SubagentStop" or is_codex_subagent(data):
+        return True
+    # Some Codex versions send a plain Stop for the child thread. Its rollout
+    # header retains the source even when the hook input has no agent_id.
+    transcript = data.get("transcript_path")
+    if not isinstance(transcript, str) or not transcript:
+        return False
+    try:
+        with Path(transcript).open(encoding="utf-8") as handle:
+            header = json.loads(handle.readline(256 * 1024))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(header, dict) or header.get("type") != "session_meta":
+        return False
+    metadata = header.get("payload")
+    return isinstance(metadata, dict) and is_codex_subagent(metadata)
+
+
 def handle_stop(data: dict[str, Any]) -> None:
+    if is_subagent_stop(data):
+        emit({})
+        return
     session_id = str(data.get("session_id") or "")
     cwd = str(data.get("cwd") or os.getcwd())
     message = data.get("last_assistant_message")

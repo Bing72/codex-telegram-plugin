@@ -60,7 +60,7 @@ Cooperating receivers must use the same token-scoped polling lock.
 
 ## Question and approval routing
 
-While the user is active in the Codex session, agents should prefer Codex's
+By default, while the user is active in the Codex session, agents should prefer Codex's
 native question UI or one concise in-session question. When `ask_user` is
 invoked, clients that negotiate MCP form elicitation receive the same question
 and Telegram receives inline buttons. The first completed answer wins; the
@@ -78,14 +78,27 @@ questions if Telegram delivery fails. Free-text questions remain native-first.
 This routes agent-initiated questions; it does not intercept arbitrary Codex
 CLI dialogs or change approval handling. Existing open sessions receive the
 same routing guidance on their next user prompt; an already-running turn is
-not changed. The setting survives plugin setup.
+not changed. The rule also covers selectable questions that would otherwise
+use `request_user_input_async` in newer Codex versions. The setting survives
+plugin setup.
+
+If questions stop arriving, verify that the credential file referenced by
+`env_path` still exists and run `python3 scripts/setup.py --refresh --test-connection`.
+In standalone mode, `codex-telegram-poller.service` must be active to receive
+answers; the bridge service alone does not poll Telegram. Restore a moved
+credential reference with `--mode standalone --env-file /absolute/path/to/existing.env`
+before starting the standalone poller. Never run a second polling consumer for
+the same bot.
 
 Telegram is also the response channel for plugin-managed approval prompts. If a
 Telegram approval fails or times out, the hook returns no decision and Codex
 falls back to its native approval flow.
 
 For ordinary local Codex sessions, only final answers are sent to Telegram with
-a visible `✅` completion marker. When Codex 0.150.0 or later interrupts an
+a visible `✅` completion marker. Subagent completions are excluded in both
+Codex lifecycle hooks and the app-server bridge; main-agent completions remain
+enabled. Hooks also check the rollout header when older Codex versions omit
+the subagent identifier. When Codex 0.150.0 or later interrupts an
 active top-level turn, the `Interrupt` hook sends a visible `🚨` Telegram alert
 instead. Each session keeps one randomized emoji marker across both notification
 types, making interleaved messages from concurrent sessions easier to distinguish.
@@ -106,6 +119,8 @@ only one process polls a bot token. Restart an existing Hermes process after
 installation or update so it loads the refreshed plugin.
 
 Hermes completion and interruption notifications are visibly labeled `Hermes`.
+Completion notifications from Hermes subagents are suppressed; the main agent's
+completion notification, questions, approvals, and interruption behavior are unchanged.
 Their headings include the current Hermes session title, just like Codex
 notifications (for example, `✅ Hermes 완료 · Telegram 제목 구현`). Questions
 use the same title. The adapter reads it from the active profile's `state.db`

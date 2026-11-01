@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -95,6 +96,7 @@ class HookOutputTests(unittest.TestCase):
         self.assertIn("ask_user 도구로 보내 Telegram에도 표시", context)
         self.assertIn("전송에 실패하면 Codex native 질문 UI", context)
         self.assertIn("자유 입력 질문은", context)
+        self.assertIn("request_user_input_async", context)
 
     def test_existing_session_gets_choice_routing_on_next_user_prompt(self) -> None:
         emitted: list[dict[str, object]] = []
@@ -156,6 +158,74 @@ class HookOutputTests(unittest.TestCase):
             "완료했습니다.",
             title="🦊 ✅ Codex 완료 · 작업 세션",
         )
+
+    def test_subagent_stop_does_not_send_completion(self) -> None:
+        for metadata in (
+            {"hook_event_name": "SubagentStop", "agent_id": "child", "agent_type": "explorer"},
+            {"hook_event_name": "Stop", "agent_id": "child", "agent_type": "worker"},
+            {"hook_event_name": "SubagentStop"},
+            {"source": {"subagent": "review"}},
+        ):
+            with (
+                self.subTest(metadata=metadata),
+                mock.patch.object(hook, "completion_session_name") as resolve,
+                mock.patch.object(hook, "send_codex_notification") as send,
+                mock.patch.object(hook, "emit") as emit,
+            ):
+                hook.handle_stop({
+                    "session_id": "session-1", "last_assistant_message": "하위 작업 완료", **metadata,
+                })
+                send.assert_not_called()
+                resolve.assert_not_called()
+                emit.assert_called_once_with({})
+
+    def test_plain_stop_checks_rollout_source_without_agent_id(self) -> None:
+        for metadata in (
+            {"source": {"subagent": {"thread_spawn": {"parent_thread_id": "parent", "depth": 1}}}},
+            {"source": {"subagent": {"other": "guardian"}}},
+            {"source": {"subAgent": "compact"}},
+            {"source": "cli", "parent_thread_id": "parent"},
+        ):
+            with self.subTest(metadata=metadata), tempfile.TemporaryDirectory() as directory:
+                transcript = Path(directory) / "rollout.jsonl"
+                transcript.write_text(json.dumps({"type": "session_meta", "payload": metadata}) + "\n", encoding="utf-8")
+                with (
+                    mock.patch.object(hook, "send_codex_notification") as send,
+                    mock.patch.object(hook, "completion_session_name") as resolve,
+                    mock.patch.object(hook, "emit") as emit,
+                ):
+                    hook.handle_stop({
+                        "session_id": "child", "hook_event_name": "Stop",
+                        "transcript_path": str(transcript), "last_assistant_message": "하위 작업 완료",
+                    })
+                send.assert_not_called()
+                resolve.assert_not_called()
+                emit.assert_called_once_with({})
+
+    def test_root_fork_and_unavailable_transcript_still_notify(self) -> None:
+        headers = (
+            json.dumps({"type": "session_meta", "payload": {"source": "cli", "forked_from_id": "older-root"}}),
+            "invalid JSON",
+            json.dumps({"type": "session_meta", "payload": None}),
+            json.dumps({"type": "unknown", "payload": {"source": {"subagent": "review"}}}),
+            None,
+        )
+        for header in headers:
+            with self.subTest(header=header), tempfile.TemporaryDirectory() as directory:
+                transcript = Path(directory) / "rollout.jsonl"
+                if header is not None:
+                    transcript.write_text(header + "\n", encoding="utf-8")
+                with (
+                    mock.patch.object(hook, "send_codex_notification") as send,
+                    mock.patch.object(hook, "completion_session_name", return_value="메인 세션"),
+                    mock.patch.object(hook, "emit"),
+                ):
+                    hook.handle_stop({
+                        "session_id": "root", "transcript_path": str(transcript),
+                        "last_assistant_message": "메인 작업 완료",
+                    })
+                send.assert_called_once()
+                self.assertEqual(send.call_args.args[0], "메인 작업 완료")
 
     def test_interrupt_sends_emergency_notification(self) -> None:
         with (

@@ -90,7 +90,7 @@ class HermesTelegramAdapter:
             return fallback
 
     def on_response(self, *, session_id: str = "", turn_id: str = "", assistant_response: str = "", platform: str = "", **_kwargs: Any) -> None:
-        if not self._local(platform) or not turn_id or not isinstance(assistant_response, str):
+        if platform == "subagent" or not self._local(platform) or not turn_id or not isinstance(assistant_response, str):
             return
         with self._lock:
             self._pending[(session_id, turn_id)] = assistant_response
@@ -108,7 +108,7 @@ class HermesTelegramAdapter:
             self._seen.add(key)
             if len(self._seen) > 500:
                 self._seen.pop()
-        if not self._local(platform):
+        if not self._local(platform) or (platform == "subagent" and not interrupted):
             return
         try:
             common = _bridge_common()

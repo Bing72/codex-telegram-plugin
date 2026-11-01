@@ -236,6 +236,34 @@ class HermesPluginTests(unittest.TestCase):
         self.assertIn("Hermes 완료", sent[0][1])
         self.assertIn("Hermes 중단", sent[1][1])
 
+    def test_subagent_completion_does_not_notify_or_buffer_response(self) -> None:
+        plugin = load_plugin()
+        sent = mock.Mock()
+        adapter = plugin.HermesTelegramAdapter(send=sent)
+        adapter.on_response(session_id="child", turn_id="t1", assistant_response="하위 작업 완료", platform="subagent")
+        self.assertEqual(adapter._pending, {})
+        with mock.patch.object(plugin, "_bridge_common") as common:
+            adapter.on_end(session_id="child", turn_id="t1", completed=True, platform="subagent")
+        common.assert_not_called()
+        sent.assert_not_called()
+
+    def test_subagent_interruption_keeps_existing_alert(self) -> None:
+        plugin = load_plugin()
+        sent = mock.Mock()
+        adapter = plugin.HermesTelegramAdapter(send=sent)
+        adapter.on_end(session_id="child", turn_id="t1", interrupted=True, platform="subagent")
+        sent.assert_called_once()
+        self.assertIn("Hermes 중단", sent.call_args.args[1])
+
+    def test_root_completion_with_session_lineage_still_notifies(self) -> None:
+        plugin = load_plugin()
+        sent = mock.Mock()
+        adapter = plugin.HermesTelegramAdapter(send=sent)
+        adapter.on_response(session_id="root", turn_id="t1", assistant_response="메인 작업 완료", platform="cli", parent_session_id="compacted-from")
+        adapter.on_end(session_id="root", turn_id="t1", completed=True, platform="cli", parent_session_id="compacted-from")
+        self.assertEqual(sent.call_args.args[0], "메인 작업 완료")
+        sent.assert_called_once()
+
     def test_telegram_origin_does_not_echo_its_own_completion(self) -> None:
         plugin = load_plugin()
         sent = mock.Mock()

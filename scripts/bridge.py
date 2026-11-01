@@ -29,6 +29,7 @@ from common import (  # noqa: E402
     TelegramBridgeError,
     ask_questions,
     bridge_url,
+    is_codex_subagent,
     load_telegram_config,
     read_bounded_json_body,
     redact_sensitive_text,
@@ -401,7 +402,7 @@ class CodexBridge:
         return [
             thread
             for thread in result["data"]
-            if isinstance(thread, dict) and not thread.get("parentThreadId")
+            if isinstance(thread, dict) and not is_codex_subagent(thread)
         ]
 
     def get_thread(self, thread_id: str, *, include_turns: bool = False) -> dict[str, Any] | None:
@@ -650,6 +651,8 @@ class CodexBridge:
     def _notify_completion(self, thread_id: str, message: str) -> None:
         try:
             thread = self.get_thread(thread_id)
+            if thread and is_codex_subagent(thread):
+                return
             title = _thread_title(thread or {"id": thread_id})
             send_codex_notification(
                 message,

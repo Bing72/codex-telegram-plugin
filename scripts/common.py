@@ -1493,6 +1493,14 @@ def resolve_session_name(
     return title[:100] or normalized_fallback
 
 
+def is_codex_subagent(metadata: dict[str, Any]) -> bool:
+    """Recognize app-server and rollout metadata without treating user forks as agents."""
+    if metadata.get("parentThreadId") or metadata.get("parent_thread_id"):
+        return True
+    source = metadata.get("source")
+    return isinstance(source, dict) and any(key in source for key in ("subAgent", "subagent"))
+
+
 def session_title(cwd: str, session_id: str) -> str:
     name = Path(cwd).name or cwd or "Codex"
     return f"Codex · {name} · {session_id[:8]}"
