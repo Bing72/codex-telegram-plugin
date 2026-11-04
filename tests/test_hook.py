@@ -159,6 +159,19 @@ class HookOutputTests(unittest.TestCase):
             title="🦊 ✅ Codex 완료 · 작업 세션",
         )
 
+    def test_ambient_suggestions_do_not_send_completion(self) -> None:
+        output = {"suggestions": [{"title": "Task", "description": "Details", "prompt": "Do task", "appId": "notion", "pluginId": None}]}
+        with mock.patch.object(hook, "send_codex_notification") as send, mock.patch.object(hook, "emit") as emit:
+            hook.handle_stop({"last_assistant_message": json.dumps(output)})
+        send.assert_not_called()
+        emit.assert_called_once_with({})
+
+    def test_unrelated_json_still_sends_completion(self) -> None:
+        message = json.dumps({"suggestions": ["ordinary response"]})
+        with mock.patch.object(hook, "send_codex_notification") as send, mock.patch.object(hook, "emit"):
+            hook.handle_stop({"last_assistant_message": message})
+        send.assert_called_once()
+
     def test_subagent_stop_does_not_send_completion(self) -> None:
         for metadata in (
             {"hook_event_name": "SubagentStop", "agent_id": "child", "agent_type": "explorer"},

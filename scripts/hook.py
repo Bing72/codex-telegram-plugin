@@ -210,6 +210,25 @@ def is_subagent_stop(data: dict[str, Any]) -> bool:
     return isinstance(metadata, dict) and is_codex_subagent(metadata)
 
 
+def is_ambient_suggestion_output(message: Any) -> bool:
+    """Ignore the Codex app's internal structured task-suggestion response."""
+    if not isinstance(message, str):
+        return False
+    try:
+        output = json.loads(message)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(output, dict) or set(output) != {"suggestions"}:
+        return False
+    suggestions = output["suggestions"]
+    return isinstance(suggestions, list) and bool(suggestions) and all(
+        isinstance(item, dict)
+        and {"title", "description", "prompt", "appId", "pluginId"} <= item.keys()
+        and all(isinstance(item[key], str) for key in ("title", "description", "prompt"))
+        for item in suggestions
+    )
+
+
 def handle_stop(data: dict[str, Any]) -> None:
     if is_subagent_stop(data):
         emit({})
@@ -217,7 +236,7 @@ def handle_stop(data: dict[str, Any]) -> None:
     session_id = str(data.get("session_id") or "")
     cwd = str(data.get("cwd") or os.getcwd())
     message = data.get("last_assistant_message")
-    if isinstance(message, str) and message.strip():
+    if isinstance(message, str) and message.strip() and not is_ambient_suggestion_output(message):
         try:
             send_codex_notification(
                 message,
