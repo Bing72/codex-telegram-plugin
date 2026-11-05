@@ -94,6 +94,26 @@ Telegram is also the response channel for plugin-managed approval prompts. If a
 Telegram approval fails or times out, the hook returns no decision and Codex
 falls back to its native approval flow.
 
+| Input | Hermes | Codex |
+| --- | --- | --- |
+| Single choice, free text, and custom answers | Native `clarify` and `hermes_telegram_ask_user` mirror to Telegram and an attached terminal | `ask_user` mirrors to Telegram and clients with MCP form elicitation; configured choice routing guides native question calls to this tool |
+| Multiple selection, including custom text | Supported | Supported through `ask_user`; legacy clients without array-form support use Telegram |
+| Questions in one batch | Up to 5, matching native Hermes `clarify` | Up to 3 through `ask_user` |
+| Execution, file, network, and permission approvals | Hermes's host-bound approval transport and allowed choices | Permission hooks or the app-server bridge; only offered approval scopes are displayed and accepted |
+| Passwords, API keys, sudo/vault unlock, login and OAuth | Native secure input and browser flows | Native secure input and browser flows; `isSecret` questions are never forwarded by the bridge |
+| Third-party MCP forms and built-in CLI menus | Their owning native client | Their owning native client; the session bridge does not implement arbitrary MCP schemas or URL authentication flows |
+
+Hermes native `clarify` mirroring uses tool-execution middleware when the host
+supports it, and keeps the native `responses` and `outcome` contract. Other tools
+and approval gates continue through their host handlers. Automatic mirroring
+requires an owned interactive terminal; finite/headless turns, subagents without
+their own viewer, and messaging-native questions retain their host input policy.
+The explicit Hermes Telegram tool can still ask remotely without a local viewer. Native question
+cancellation closes the mirrored wait. Declining a Codex MCP form leaves the
+Telegram answer path available; cancelling the question or its MCP call stops
+both. App-server resolution or disconnect retires that connection's pending
+question/approval, and late replies cannot answer a replacement connection.
+
 For ordinary local Codex sessions, only final answers are sent to Telegram with
 a visible `✅` completion marker. Subagent completions are excluded in both
 Codex lifecycle hooks and the app-server bridge; main-agent completions remain
@@ -131,6 +151,9 @@ the plugin's bot. In an interactive Hermes CLI, it also opens Hermes's native
 terminal question panel: either channel can submit, and the first submission
 wins. Terminal submissions cancel the Telegram wait; Telegram submissions
 close the terminal panel. Multi-select and free-text answers work on both.
+For gateway-backed Hermes CLI sessions, questions use the owning session's
+native clarify request, so the terminal panel appears even though the tool runs
+in the gateway. Replies and cancellation stay bound to that session and profile.
 If Telegram delivery fails, the terminal panel remains usable. In contexts
 without an interactive CLI, delivery failure returns an error telling the
 agent to use native `clarify`, together with the failed stage and safe diagnostic
@@ -138,8 +161,9 @@ details. Failures are also logged without raw unexpected-exception messages.
 A missing configured credential file is reported explicitly; restore its
 reference or rerun setup with the correct `--env-file`. Telegram initialization
 failures do not prevent an interactive terminal panel from opening. The
-adapter gives Hermes guidance to use this tool, but it does **not** silently
-intercept every native `clarify` invocation. Hermes dangerous-command approvals
+adapter also mirrors ordinary native `clarify` calls through Hermes's supported
+tool-execution middleware, retaining native validation, results, and cancellation.
+Hermes dangerous-command approvals
 use its host-owned approval transport and preserve its allowed scopes and safety
 checks. Codex `/sessions`, `/status`, and `/start_work` remain Codex-only.
 

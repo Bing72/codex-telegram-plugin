@@ -71,7 +71,7 @@ def find_codex_binary() -> str:
 class AppServerClient:
     def __init__(
         self,
-        server_request_handler: Callable[[str, dict[str, Any]], dict[str, Any]],
+        server_request_handler: Callable[..., dict[str, Any]],
         notification_handler: Callable[[str, dict[str, Any]], None],
     ) -> None:
         self.server_request_handler = server_request_handler
@@ -79,6 +79,7 @@ class AppServerClient:
         self.process: subprocess.Popen[str] | None = None
         self._next_id = 1
         self._pending: dict[int, queue.Queue[dict[str, Any]]] = {}
+        self._server_requests: dict[tuple[Any, Any], threading.Event] = {}
         self._pending_lock = threading.Lock()
         self._write_lock = threading.Lock()
         self._start_lock = threading.Lock()
@@ -134,12 +135,14 @@ class AppServerClient:
             )
             self.notify("initialized", {}, ensure_started=False)
 
-    def _send(self, message: dict[str, Any]) -> None:
-        process = self.process
-        if not process or process.poll() is not None or process.stdin is None:
-            raise RpcError("codex app-server is not running")
+    def _send(self, message: dict[str, Any], *, expected_process: Any = None) -> None:
         encoded = json.dumps(message, ensure_ascii=False, separators=(",", ":"))
         with self._write_lock:
+            process = self.process
+            if expected_process is not None and process is not expected_process:
+                raise RpcError("codex app-server connection changed")
+            if not process or process.poll() is not None or process.stdin is None:
+                raise RpcError("codex app-server is not running")
             process.stdin.write(encoded + "\n")
             process.stdin.flush()
 
@@ -183,13 +186,14 @@ class AppServerClient:
             self.start()
         self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
-    def respond(self, request_id: Any, result: Any = None, error: Any = None) -> None:
+    def respond(self, request_id: Any, result: Any = None, error: Any = None,
+                *, expected_process: Any = None) -> None:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id}
         if error is None:
             payload["result"] = result
         else:
             payload["error"] = error
-        self._send(payload)
+        self._send(payload, expected_process=expected_process)
 
     def _read_loop(self) -> None:
         process = self.process
@@ -207,15 +211,27 @@ class AppServerClient:
                 if not isinstance(message, dict):
                     continue
                 if "method" in message and "id" in message:
+                    if type(message["id"]) not in (str, int):
+                        continue
+                    cancel = threading.Event()
+                    with self._pending_lock:
+                        self._server_requests[(process, message["id"])] = cancel
                     threading.Thread(
                         target=self._handle_server_request,
-                        args=(message,),
+                        args=(message, cancel, process),
                         daemon=True,
                     ).start()
                     continue
                 if "method" in message:
                     try:
                         params = message.get("params")
+                        if message["method"] == "serverRequest/resolved" and isinstance(params, dict):
+                            request_id = params.get("requestId")
+                            if type(request_id) in (str, int):
+                                with self._pending_lock:
+                                    cancel = self._server_requests.get((process, request_id))
+                                if cancel is not None:
+                                    cancel.set()
                         self.notification_handler(
                             str(message["method"]),
                             params if isinstance(params, dict) else {},
@@ -244,34 +260,50 @@ class AppServerClient:
             }
             with self._pending_lock:
                 pending_queues = list(self._pending.values())
+                ended = [key for key in self._server_requests if key[0] is process]
+                for key in ended:
+                    self._server_requests.pop(key).set()
             for pending in pending_queues:
                 try:
                     pending.put_nowait(failure)
                 except queue.Full:
                     pass
 
-    def _handle_server_request(self, message: dict[str, Any]) -> None:
+    def _handle_server_request(self, message: dict[str, Any], cancel_event: threading.Event | None = None,
+                               process: Any = None) -> None:
         request_id = message.get("id")
         params = message.get("params")
+        cancel_event = cancel_event or threading.Event()
+        process = process if process is not None else self.process
         try:
+            if cancel_event.is_set():
+                return
             result = self.server_request_handler(
                 str(message.get("method")),
                 params if isinstance(params, dict) else {},
+                cancel_event=cancel_event,
             )
-            self.respond(request_id, result=result)
+            if not cancel_event.is_set():
+                self.respond(request_id, result=result, expected_process=process)
         except Exception as exc:
             LOG.error(
                 "server request handler failed for %s: %s",
                 message.get("method"),
                 redact_sensitive_text(exc),
             )
-            try:
-                self.respond(
-                    request_id,
-                    error={"code": -32000, "message": redact_sensitive_text(exc)},
-                )
-            except RpcError:
-                pass
+            if not cancel_event.is_set():
+                try:
+                    self.respond(
+                        request_id, error={"code": -32000, "message": redact_sensitive_text(exc)},
+                        expected_process=process,
+                    )
+                except RpcError:
+                    pass
+        finally:
+            with self._pending_lock:
+                key = (process, request_id)
+                if self._server_requests.get(key) is cancel_event:
+                    self._server_requests.pop(key, None)
 
     def _stderr_loop(self) -> None:
         process = self.process
@@ -517,9 +549,13 @@ class CodexBridge:
             timeout=120,
         )
 
-    def handle_server_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    def handle_server_request(self, method: str, params: dict[str, Any],
+                              *, cancel_event: threading.Event | None = None) -> dict[str, Any]:
         thread_id = str(params.get("threadId") or "codex")
         if method == "item/tool/requestUserInput":
+            if any(isinstance(question, dict) and question.get("isSecret") is True
+                   for question in params.get("questions") or []):
+                raise RpcError("Secret input requires the native Codex input surface")
             converted: list[dict[str, Any]] = []
             question_ids: list[str] = []
             for index, question in enumerate(params.get("questions") or []):
@@ -542,7 +578,7 @@ class CodexBridge:
                         "question": str(question.get("question") or ""),
                         "options": options,
                         "multiple": False,
-                        "custom": True,
+                        "custom": question.get("isOther") is True or not options,
                     }
                 )
             answers = ask_questions(
@@ -554,7 +590,8 @@ class CodexBridge:
                     _thread_title({"id": thread_id}),
                 ),
                 config=self.config,
-            )
+                cancel_event=cancel_event,
+            ) or []
             return {
                 "answers": {
                     question_id: {"answers": answers[index] if index < len(answers) else []}
@@ -571,6 +608,10 @@ class CodexBridge:
                 permission = "Bash"
                 title = str(params.get("reason") or params.get("command") or "명령 실행")
                 patterns = [str(params["command"])] if params.get("command") else []
+                network = params.get("networkApprovalContext")
+                if isinstance(network, dict):
+                    permission = "network"
+                    title = f"네트워크 접근: {network.get('protocol', '')} {network.get('host', '')}\n{title}"
             elif method == "item/fileChange/requestApproval":
                 permission = "apply_patch"
                 title = str(params.get("reason") or params.get("grantRoot") or "파일 변경")
@@ -579,25 +620,36 @@ class CodexBridge:
                 permission = "permissions"
                 title = str(params.get("reason") or json.dumps(params.get("permissions"), ensure_ascii=False))
                 patterns = []
-            reply = request_permission(
-                session_id=thread_id,
-                title=title,
-                permission=permission,
-                patterns=patterns,
-                directory=str(params.get("cwd") or Path.home()),
-                config=self.config,
-            )
+            available = params.get("availableDecisions")
+            if isinstance(available, list) and not any(
+                choice in available for choice in ("accept", "acceptForSession", "decline", "cancel")
+            ):
+                raise RpcError("No supported approval decision is available")
+            try:
+                reply = request_permission(
+                    session_id=thread_id, title=title, permission=permission, patterns=patterns,
+                    directory=str(params.get("cwd") or Path.home()), config=self.config,
+                    cancel_event=cancel_event,
+                    allow_always=not isinstance(available, list) or "acceptForSession" in available,
+                    allow_once=not isinstance(available, list) or "accept" in available,
+                )
+            except (TelegramBridgeError, TimeoutError):
+                reply = "reject"
             if method == "item/permissions/requestApproval":
-                if reply == "reject":
+                if reply not in {"once", "always"}:
                     return {"permissions": {}, "scope": "turn"}
                 requested = params.get("permissions")
                 return {
                     "permissions": requested if isinstance(requested, dict) else {},
                     "scope": "session" if reply == "always" else "turn",
                 }
-            if reply == "reject":
-                return {"decision": "decline"}
-            return {"decision": "acceptForSession" if reply == "always" else "accept"}
+            decision = {"once": "accept", "always": "acceptForSession"}.get(reply, "decline")
+            if isinstance(available, list) and decision not in available:
+                fallback = ("decline", "cancel")
+                decision = next((candidate for candidate in fallback if candidate in available), "")
+                if not decision:
+                    raise RpcError("No supported approval decision is available")
+            return {"decision": decision}
 
         raise RpcError(f"unsupported app-server request: {method}")
 

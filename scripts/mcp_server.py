@@ -96,6 +96,10 @@ class ElicitationCancelled(RuntimeError):
     """The other question channel supplied an answer first."""
 
 
+class QuestionCancelled(RuntimeError):
+    """The client or user cancelled the complete question."""
+
+
 @dataclass(frozen=True)
 class AskUserCall:
     request_id: str | int | None
@@ -242,7 +246,9 @@ def _parse_ask_user_call(request: dict[str, Any]) -> AskUserCall:
     arguments = params.get("arguments") or {}
     if not isinstance(arguments, dict):
         raise ValueError("invalid tool arguments")
-    timeout = int(arguments.get("timeout_seconds") or 86400)
+    timeout = arguments.get("timeout_seconds", 86400)
+    if type(timeout) is not int or not 30 <= timeout <= 86400:
+        raise ValueError("timeout_seconds must be an integer between 30 and 86400")
     meta = request_meta(params)
     session_id = str(
         meta.get("threadId")
@@ -257,6 +263,8 @@ def _parse_ask_user_call(request: dict[str, Any]) -> AskUserCall:
         server_url=server_url,
     )
     normalized_questions = normalize_questions(arguments.get("questions") or [])
+    if len(normalized_questions) > 3:
+        raise ValueError("Codex ask_user supports at most three questions per call")
     question_request_id = f"codex-question-{secrets.token_urlsafe(12)}"
     return AskUserCall(
         request_id=request_id if isinstance(request_id, (str, int)) else None,
@@ -338,7 +346,7 @@ def _elicitation_form(
                     "title": str(question.get("header") or f"질문 {index}"),
                     "description": description,
                     "items": {"anyOf": choices},
-                    "minItems": 1,
+                    "minItems": 0,
                 }
             else:
                 properties[key] = {
@@ -402,18 +410,20 @@ def _decode_elicitation_answers(
     for question in form.questions:
         raw_answer = content.get(question.key)
         selected = raw_answer if question.multiple else [raw_answer]
-        if not isinstance(selected, list) or not selected:
+        if (not isinstance(selected, list) or (not question.multiple and not selected)
+                or any(not isinstance(value, str) or not value.strip() for value in selected)):
             raise ValueError("Codex 질문 답변이 비어 있습니다")
-        normalized = [str(value) for value in selected]
+        normalized = list(selected)
+        allowed = (*question.labels, question.custom_choice)
+        if question.labels and any(value not in allowed for value in normalized):
+            raise ValueError("알 수 없는 Codex 선택지입니다")
         if question.custom_choice is not None and question.custom_choice in normalized:
-            if len(normalized) != 1 or question.custom_key is None:
-                raise ValueError("직접 입력은 다른 선택지와 함께 사용할 수 없습니다")
+            if question.custom_key is None:
+                raise ValueError("직접 입력 필드가 없습니다")
             custom = content.get(question.custom_key)
             if not isinstance(custom, str) or not custom.strip():
                 raise ValueError("직접 입력을 선택했으면 답변을 작성해야 합니다")
-            normalized = [custom.strip()]
-        elif question.labels and any(value not in question.labels for value in normalized):
-            raise ValueError("알 수 없는 Codex 선택지입니다")
+            normalized = [custom.strip() if value == question.custom_choice else value for value in normalized]
         answers.append(normalized)
     return answers
 
@@ -427,6 +437,7 @@ def _telegram_answers(call: AskUserCall, cancel_event: threading.Event | None = 
         request_id=call.question_request_id,
         session_name=call.session_name,
         cancel_event=cancel_event,
+        cancel_message="Codex에서 질문이 종료되었습니다.",
     )
 
 
@@ -497,6 +508,7 @@ class McpRuntime:
         self._outbound_lock = threading.Lock()
         self._next_outbound_id = 1
         self._outbound_waiters: dict[int, queue.Queue[dict[str, Any]]] = {}
+        self._active_calls: dict[str | int, threading.Event] = {}
 
     def _next_request_id(self) -> int:
         with self._outbound_lock:
@@ -515,6 +527,8 @@ class McpRuntime:
             self._outbound_waiters.pop(request_id, None)
 
     def _resolve_outbound(self, message: dict[str, Any]) -> bool:
+        if "method" in message or not ("result" in message or "error" in message):
+            return False
         request_id = message.get("id")
         if not isinstance(request_id, int) or isinstance(request_id, bool):
             return False
@@ -572,7 +586,9 @@ class McpRuntime:
         finally:
             self._remove_outbound(request_id)
 
-    def _answer_via_both_channels(self, call: AskUserCall) -> tuple[str, list[list[str]]]:
+    def _answer_via_both_channels(
+        self, call: AskUserCall, cancel_event: threading.Event | None = None,
+    ) -> tuple[str, list[list[str]]]:
         form = _elicitation_form(
             call.questions, call.session_name, protocol_version=self.protocol_version
         )
@@ -598,6 +614,9 @@ class McpRuntime:
                     timeout_seconds=call.timeout_seconds,
                     cancel_event=elicitation_cancel,
                 )
+                result = response.get("result")
+                if isinstance(result, dict) and result.get("action") == "cancel":
+                    raise QuestionCancelled("Codex user cancelled the question")
                 answers = _decode_elicitation_answers(response, form)
                 if answers is not None:
                     completed.put(("codex", answers))
@@ -612,43 +631,50 @@ class McpRuntime:
         threading.Thread(target=codex_worker, name="codex-elicitation", daemon=True).start()
         deadline = time.monotonic() + call.timeout_seconds
         errors: list[Exception] = []
-        while time.monotonic() < deadline:
-            try:
-                source, outcome = completed.get(timeout=min(0.2, deadline - time.monotonic()))
-            except queue.Empty:
-                if all(event.is_set() for event in completed_workers.values()):
-                    break
-                continue
-            if isinstance(outcome, list):
-                if source == "telegram":
-                    elicitation_cancel.set()
-                else:
-                    telegram_cancel.set()
-                return source, outcome
-            errors.append(outcome)
-        telegram_cancel.set()
-        elicitation_cancel.set()
-        if errors:
-            raise errors[-1]
-        raise TimeoutError("Telegram and Codex question timed out")
-
-    def _handle_ask_user(self, request: dict[str, Any]) -> None:
-        call: AskUserCall | None = None
         try:
+            while time.monotonic() < deadline:
+                if cancel_event is not None and cancel_event.is_set():
+                    raise QuestionCancelled("Codex client cancelled the question")
+                try:
+                    source, outcome = completed.get(timeout=max(0.001, min(0.2, deadline - time.monotonic())))
+                except queue.Empty:
+                    if all(event.is_set() for event in completed_workers.values()):
+                        break
+                    continue
+                if isinstance(outcome, QuestionCancelled):
+                    raise outcome
+                if isinstance(outcome, list):
+                    return source, outcome
+                errors.append(outcome)
+            if errors:
+                raise errors[-1]
+            raise TimeoutError("Telegram and Codex question timed out")
+        finally:
+            telegram_cancel.set()
+            elicitation_cancel.set()
+
+    def _handle_ask_user(
+        self, request: dict[str, Any], cancel_event: threading.Event | None = None,
+    ) -> None:
+        call: AskUserCall | None = None
+        cancel_event = cancel_event or threading.Event()
+        try:
+            if cancel_event.is_set():
+                raise QuestionCancelled("Codex client cancelled the question")
             call = _parse_ask_user_call(request)
             if not self.supports_elicitation or (
                 self.protocol_version == LEGACY_PROTOCOL_VERSION
                 and any(question.get("multiple") is True for question in call.questions)
             ):
                 _report_progress(call, progress=0, state="Telegram 답변 대기")
-                answers = _telegram_answers(call)
+                answers = _telegram_answers(call, cancel_event)
                 if answers is None:
-                    raise TimeoutError("Telegram question was cancelled")
+                    raise QuestionCancelled("Telegram question was cancelled")
                 _report_progress(call, progress=1, state="Telegram 답변을 Codex에 전달함")
                 response = _tool_result(call.request_id, answers)
             else:
                 _report_progress(call, progress=0, state="Telegram·Codex 선택지 답변 대기")
-                source, answers = self._answer_via_both_channels(call)
+                source, answers = self._answer_via_both_channels(call, cancel_event)
                 state = (
                     "Telegram 답변을 Codex에 전달함"
                     if source == "telegram"
@@ -656,6 +682,13 @@ class McpRuntime:
                 )
                 _report_progress(call, progress=1, state=state)
                 response = _tool_result(call.request_id, answers)
+        except QuestionCancelled as exc:
+            if call is not None:
+                _report_progress(call, progress=1, state="질문 취소")
+            response = {
+                "jsonrpc": "2.0", "id": request.get("id"),
+                "error": {"code": -32800, "message": str(exc)},
+            }
         except (ValueError, TelegramBridgeError, TimeoutError) as exc:
             if call is not None:
                 _report_progress(call, progress=1, state="응답 없이 종료")
@@ -674,13 +707,30 @@ class McpRuntime:
                 "id": request.get("id"),
                 "error": {"code": -32603, "message": redact_sensitive_text(exc)},
             }
-        write_message(response)
+        finally:
+            client_cancelled = cancel_event.is_set()
+            cancel_event.set()
+            with self._outbound_lock:
+                request_id = request.get("id")
+                if type(request_id) in (str, int) and self._active_calls.get(request_id) is cancel_event:
+                    self._active_calls.pop(request_id, None)
+        if not client_cancelled:
+            write_message(response)
 
     def dispatch(self, request: dict[str, Any]) -> None:
         if self._resolve_outbound(request):
             return
         method = request.get("method")
         if not isinstance(method, str):
+            return
+        if method == "notifications/cancelled":
+            params = request.get("params")
+            request_id = params.get("requestId") if isinstance(params, dict) else None
+            if type(request_id) in (str, int):
+                with self._outbound_lock:
+                    cancelled = self._active_calls.get(request_id)
+                if cancelled is not None:
+                    cancelled.set()
             return
         if method == "initialize":
             params = request.get("params")
@@ -694,9 +744,23 @@ class McpRuntime:
         if method == "tools/call":
             params = request.get("params")
             if isinstance(params, dict) and params.get("name") == "ask_user":
+                cancelled = threading.Event()
+                request_id = request.get("id")
+                if type(request_id) not in (str, int):
+                    write_message({"jsonrpc": "2.0", "id": None,
+                                   "error": {"code": -32600, "message": "Invalid request id"}})
+                    return
+                with self._outbound_lock:
+                    duplicate = request_id in self._active_calls
+                    if not duplicate:
+                        self._active_calls[request_id] = cancelled
+                if duplicate:
+                    write_message({"jsonrpc": "2.0", "id": request_id,
+                                   "error": {"code": -32600, "message": "Duplicate active request id"}})
+                    return
                 threading.Thread(
                     target=self._handle_ask_user,
-                    args=(request,),
+                    args=(request, cancelled),
                     name="codex-telegram-ask-user",
                     daemon=True,
                 ).start()

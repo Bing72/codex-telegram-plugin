@@ -1143,15 +1143,17 @@ def normalize_questions(raw_questions: Iterable[dict[str, Any]]) -> list[dict[st
         options: list[dict[str, str]] = []
         for option_index, option in enumerate(options_raw):
             if isinstance(option, str):
-                options.append({"label": option, "description": ""})
-                continue
+                option = {"label": option}
             if not isinstance(option, dict) or not isinstance(option.get("label"), str):
                 raise TelegramBridgeError(
                     f"Question {index + 1} option {option_index + 1} needs a label"
                 )
+            label = option["label"].strip()
+            if not label or any(existing["label"] == label for existing in options):
+                raise TelegramBridgeError("Question option labels must be non-empty and distinct")
             options.append(
                 {
-                    "label": option["label"],
+                    "label": label,
                     "description": str(option.get("description") or ""),
                 }
             )
@@ -1320,6 +1322,10 @@ class _PermissionReplyHandler(BaseHTTPRequestHandler):
             reply = body.get("reply")
             if reply not in {"once", "always", "reject"}:
                 raise ValueError("invalid reply")
+            if reply == "always" and not server.allow_always:
+                reply = "reject"
+            if reply == "once" and not server.allow_once:
+                reply = "reject"
             server.replies.put_nowait(reply)
         except RequestBodyTooLarge:
             self.send_error(413)
@@ -1341,9 +1347,11 @@ class _PermissionReplyHandler(BaseHTTPRequestHandler):
 class _PermissionHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, request_id: str) -> None:
+    def __init__(self, request_id: str, *, allow_always: bool = True, allow_once: bool = True) -> None:
         super().__init__((DEFAULT_BRIDGE_HOST, 0), _PermissionReplyHandler)
         self.request_id = request_id
+        self.allow_always = allow_always
+        self.allow_once = allow_once
         self.replies: queue.Queue[str] = queue.Queue(maxsize=1)
 
 
@@ -1356,10 +1364,15 @@ def request_permission(
     directory: str,
     timeout_seconds: float = PERMISSION_TIMEOUT_SECONDS,
     config: TelegramConfig | None = None,
+    cancel_event: threading.Event | None = None,
+    allow_always: bool = True,
+    allow_once: bool = True,
 ) -> str:
+    if cancel_event is not None and cancel_event.is_set():
+        raise TelegramBridgeError("Permission request cancelled")
     cfg = config or load_telegram_config()
     request_id = f"codex-permission-{secrets.token_urlsafe(12)}"
-    server = _PermissionHTTPServer(request_id)
+    server = _PermissionHTTPServer(request_id, allow_always=allow_always, allow_once=allow_once)
     host, port = server.server_address
     server_url = f"http://{host}:{port}/"
     short_hash = permission_short_hash(request_id, session_id, "request", server_url)
@@ -1372,13 +1385,11 @@ def request_permission(
     ]
     if patterns:
         detail_lines.append(f"대상: {', '.join(patterns)}")
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "✅ 이번만 허용", "callback_data": f"p:{short_hash}:o"}],
-            [{"text": "♻️ 동일 요청 항상 허용", "callback_data": f"p:{short_hash}:a"}],
-            [{"text": "❌ 거부", "callback_data": f"p:{short_hash}:r"}],
-        ]
-    }
+    rows = [[{"text": "✅ 이번만 허용", "callback_data": f"p:{short_hash}:o"}]] if allow_once else []
+    if allow_always:
+        rows.append([{"text": "♻️ 동일 요청 항상 허용", "callback_data": f"p:{short_hash}:a"}])
+    rows.append([{"text": "❌ 거부", "callback_data": f"p:{short_hash}:r"}])
+    keyboard = {"inline_keyboard": rows}
     message_id = send_message(cfg, "\n".join(detail_lines), reply_markup=keyboard)
     now_ms = int(time.time() * 1000)
     path = pending_permission_dir(cfg) / f"{short_hash}.json"
@@ -1406,7 +1417,8 @@ def request_permission(
     ]
     if patterns:
         terminal_details.append(f"대상: {', '.join(patterns)}")
-    terminal_details.append("선택: 이번만 허용 / 동일 요청 항상 허용 / 거부")
+    choices = (["이번만 허용"] if allow_once else []) + (["동일 요청 항상 허용"] if allow_always else []) + ["거부"]
+    terminal_details.append("선택: " + " / ".join(choices))
     mirror_terminal_event(
         "권한 요청",
         short_hash,
@@ -1417,7 +1429,22 @@ def request_permission(
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        reply = server.replies.get(timeout=timeout_seconds)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                try:
+                    edit_message(cfg, message_id, "Codex 권한 요청이 종료되었습니다.")
+                except TelegramBridgeError:
+                    pass
+                raise TelegramBridgeError("Permission request cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise queue.Empty
+            try:
+                reply = server.replies.get(timeout=min(0.2, remaining))
+                break
+            except queue.Empty:
+                continue
         label = {
             "once": "이번 요청 허용",
             "always": "동일 요청을 현재 세션 동안 허용",
