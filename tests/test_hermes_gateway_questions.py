@@ -51,14 +51,47 @@ class HermesGatewayQuestionTests(unittest.TestCase):
         )
         return live, frames, ready
 
-    def run_question(self, adapter, live, questions, **kwargs):
+    def run_question(self, adapter, live, questions, *, timeout_seconds=3, **kwargs):
         token = self.viewer_context.set(live)
         try:
             with mock.patch.object(adapter, "_terminal", return_value=None):
-                return json.loads(adapter.ask_user({"questions": questions, "timeout_seconds": 3},
+                return json.loads(adapter.ask_user({"questions": questions, "timeout_seconds": timeout_seconds},
                                                     session_id="session-1", **kwargs))
         finally:
             self.viewer_context.reset(token)
+
+    def test_question_budget_alone_controls_viewer_deadline(self) -> None:
+        from tools import clarify_gateway
+
+        for budget in (0, 2):
+            with self.subTest(budget=budget):
+                plugin = load_plugin()
+                live, frames, ready = self.make_viewer()
+                cancelled = threading.Event()
+
+                def telegram(_questions, **kwargs):
+                    self.assertEqual(kwargs["timeout_seconds"], budget)
+                    self.assertTrue(ready.wait(1))
+                    time.sleep(0.35)
+                    frame = next(f for f in frames if f.get("method") == "clarify")
+                    self.assertTrue(self.requests.resolve({
+                        "id": frame["id"], "result": {"answers": {"q0": "native"}, "outcome": "submitted"},
+                    }))
+                    if kwargs["cancel_event"].wait(1):
+                        cancelled.set()
+                    return None
+
+                adapter = plugin.HermesTelegramAdapter(ask=telegram)
+                native_request = self.requests.ask_viewer_result
+                with (mock.patch.object(clarify_gateway, "get_clarify_timeout", return_value=0.01),
+                      mock.patch.object(self.requests, "ask_viewer_result", wraps=native_request) as native):
+                    result = adapter._ask_with_viewer((live, None), [{"question": "Question?"}], [], {
+                        "session_id": "session-1", "timeout_seconds": budget,
+                    })
+                self.assertEqual(result, {"answers": [["native"]], "outcome": "submitted"})
+                self.assertEqual(native.call_args.kwargs["timeout"], budget or None)
+                self.assertTrue(cancelled.is_set())
+                self.assertFalse(self.requests.open_requests(live.event_stream, "session-1"))
 
     def test_gateway_question_is_shown_to_the_attached_terminal(self) -> None:
         plugin = load_plugin()
@@ -69,7 +102,7 @@ class HermesGatewayQuestionTests(unittest.TestCase):
             return [["예"]]
 
         adapter = plugin.HermesTelegramAdapter(ask=telegram)
-        result = self.run_question(adapter, live, [{"question": "진행?", "choices": ["예", "아니오"]}])
+        result = self.run_question(adapter, live, [{"question": "진행?", "choices": ["예", "아니오"]}], timeout_seconds=0)
         self.assertEqual(result, {"answers": [["예"]]})
         requests = [frame for frame in frames if frame.get("method") == "clarify"]
         self.assertEqual(len(requests), 1)
@@ -228,7 +261,7 @@ class HermesGatewayQuestionTests(unittest.TestCase):
         runtime = types.SimpleNamespace(_gateway_runner_ref=lambda: runner)
         with (mock.patch.dict("sys.modules", {"gateway.run": runtime}),
               mock.patch.object(session_authorities, "authority_for_home", return_value=authority)):
-            result = self.run_question(adapter, live, [{"question": "입력?"}])
+            result = self.run_question(adapter, live, [{"question": "입력?"}], timeout_seconds=0)
         self.assertEqual(result, {"answers": [[]], "outcome": "cancelled"})
         self.assertTrue(cancelled.is_set())
         self.assertFalse(self.requests.open_requests(live.event_stream, "session-1"))

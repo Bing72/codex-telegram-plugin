@@ -151,9 +151,28 @@ the plugin's bot. In an interactive Hermes CLI, it also opens Hermes's native
 terminal question panel: either channel can submit, and the first submission
 wins. Terminal submissions cancel the Telegram wait; Telegram submissions
 close the terminal panel. Multi-select and free-text answers work on both.
+Ordinary questions in both integrations now wait until answered or cancelled
+by default (`timeout_seconds: 0`). Positive values request a finite deadline;
+do not add a time limit unless the user asks for one. The shared Codex
+app-server question path uses the same unlimited default. Pending unlimited
+questions remain valid beyond the normal seven-day retention while their
+owning process is alive; answers and cancellation remove them, and the receiver
+cleans up records whose owning process has exited. This does not persist a
+question across a process restart. Command approvals and secret input retain
+their existing safety rules and time limits.
+Codex clients with MCP form elicitation pause their outer tool timeout while
+the question form is waiting for input. Telegram-only fallback clients can
+still impose their own MCP timeout; changing the server wait cannot disable
+a timeout owned by an external client.
 For gateway-backed Hermes CLI sessions, questions use the owning session's
 native clarify request, so the terminal panel appears even though the tool runs
 in the gateway. Replies and cancellation stay bound to that session and profile.
+The connected classic CLI also has its own native question timer. Configure
+`hermes config set agent.clarify_timeout 0` and reopen existing CLI processes
+to make that renderer wait indefinitely as well (an explicitly configured
+legacy `clarify.timeout` takes precedence and must also be non-positive).
+Refresh the installed adapters and receiver after an update; new sessions
+load updated question tools, while already-open MCP clients can retain old code.
 If Telegram delivery fails, the terminal panel remains usable. In contexts
 without an interactive CLI, delivery failure returns an error telling the
 agent to use native `clarify`, together with the failed stage and safe diagnostic

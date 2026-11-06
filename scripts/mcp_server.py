@@ -74,9 +74,10 @@ TOOL = {
             },
             "timeout_seconds": {
                 "type": "integer",
-                "minimum": 30,
+                "minimum": 0,
                 "maximum": 86400,
-                "default": 86400,
+                "default": 0,
+                "description": "Seconds to wait; 0 waits indefinitely until answered or cancelled.",
             },
         },
     },
@@ -246,9 +247,9 @@ def _parse_ask_user_call(request: dict[str, Any]) -> AskUserCall:
     arguments = params.get("arguments") or {}
     if not isinstance(arguments, dict):
         raise ValueError("invalid tool arguments")
-    timeout = arguments.get("timeout_seconds", 86400)
-    if type(timeout) is not int or not 30 <= timeout <= 86400:
-        raise ValueError("timeout_seconds must be an integer between 30 and 86400")
+    timeout = arguments.get("timeout_seconds", 0)
+    if type(timeout) is not int or not 0 <= timeout <= 86400:
+        raise ValueError("timeout_seconds must be an integer between 0 and 86400")
     meta = request_meta(params)
     session_id = str(
         meta.get("threadId")
@@ -568,17 +569,20 @@ class McpRuntime:
                 "params": form.params,
             }
         )
-        deadline = time.monotonic() + timeout_seconds
+        deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
         try:
-            while time.monotonic() < deadline:
+            while True:
                 if cancel_event.is_set():
                     self._cancel_elicitation(
                         request_id,
                         "다른 채널의 답변이 먼저 도착했습니다.",
                     )
                     raise ElicitationCancelled()
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    break
                 try:
-                    return waiter.get(timeout=min(0.2, deadline - time.monotonic()))
+                    return waiter.get(timeout=0.2 if remaining is None else min(0.2, remaining))
                 except queue.Empty:
                     continue
             self._cancel_elicitation(request_id, "질문 응답 시간이 만료되었습니다.")
@@ -629,14 +633,19 @@ class McpRuntime:
 
         threading.Thread(target=telegram_worker, name="telegram-question", daemon=True).start()
         threading.Thread(target=codex_worker, name="codex-elicitation", daemon=True).start()
-        deadline = time.monotonic() + call.timeout_seconds
+        deadline = time.monotonic() + call.timeout_seconds if call.timeout_seconds else None
         errors: list[Exception] = []
         try:
-            while time.monotonic() < deadline:
+            while True:
                 if cancel_event is not None and cancel_event.is_set():
                     raise QuestionCancelled("Codex client cancelled the question")
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    break
                 try:
-                    source, outcome = completed.get(timeout=max(0.001, min(0.2, deadline - time.monotonic())))
+                    source, outcome = completed.get(
+                        timeout=0.2 if remaining is None else min(0.2, remaining)
+                    )
                 except queue.Empty:
                     if all(event.is_set() for event in completed_workers.values()):
                         break

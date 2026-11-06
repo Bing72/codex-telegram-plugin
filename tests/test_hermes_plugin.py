@@ -28,6 +28,42 @@ def load_plugin():
 
 
 class HermesPluginTests(unittest.TestCase):
+    def test_question_guidance_defaults_to_unlimited_wait(self) -> None:
+        guidance = load_plugin().HermesTelegramAdapter.question_guidance()
+        self.assertIn("timeout_seconds", guidance)
+        self.assertIn("무제한", guidance)
+
+    def test_ordinary_question_timeout_defaults_to_unlimited(self) -> None:
+        plugin = load_plugin()
+        adapter = plugin.HermesTelegramAdapter(ask=mock.Mock(return_value=[["answer"]]))
+        with (mock.patch.object(adapter, "_terminal", return_value=None),
+              mock.patch.object(adapter, "_gateway_viewer", return_value=None)):
+            for value in (None, 0, 1, 86400):
+                with self.subTest(timeout=value):
+                    args: dict = {"questions": [{"question": "Question?"}]}
+                    if value is not None:
+                        args["timeout_seconds"] = value
+                    result = json.loads(adapter.ask_user(args))
+                    self.assertEqual(result, {"answers": [["answer"]]})
+                    self.assertEqual(adapter.ask.call_args.kwargs["timeout_seconds"], value or 0)
+        ctx = mock.Mock()
+        plugin.register(ctx)
+        schema = ctx.register_tool.call_args.kwargs["schema"]["parameters"]["properties"]["timeout_seconds"]
+        self.assertEqual(schema["minimum"], 0)
+        self.assertEqual(schema["default"], 0)
+
+    def test_timeout_rejects_non_integer_and_out_of_range_without_echoing(self) -> None:
+        plugin = load_plugin()
+        adapter = plugin.HermesTelegramAdapter(ask=mock.Mock(return_value=[["answer"]]))
+        for value in (True, False, None, "secret-token", "5", 1.5, -1, 86401, [], {}):
+            with self.subTest(timeout=value), mock.patch.object(plugin, "_bridge_common") as common:
+                result = json.loads(adapter.ask_user({
+                    "questions": [{"question": "Question?"}], "timeout_seconds": value,
+                }))
+                self.assertEqual(result, {"error": "timeout_seconds must be an integer from 0 to 86400"})
+                common.assert_not_called()
+        adapter.ask.assert_not_called()
+
     def test_missing_credentials_return_actionable_diagnostics(self) -> None:
         plugin = load_plugin()
         common = plugin._bridge_common()
@@ -74,6 +110,67 @@ class HermesPluginTests(unittest.TestCase):
         self.assertIn("telegram", logs.output[0])
         self.assertNotIn("private initialization details", " ".join(logs.output))
         adapter.ask.assert_not_called()
+
+    def test_native_modal_uses_per_question_budget_without_global_config_change(self) -> None:
+        try:
+            from hermes_cli.cli_modal_mixin import CLIModalMixin
+            from cli import CLI_CONFIG
+        except ImportError:
+            self.skipTest("Run with hermes --run-module unittest")
+        import copy
+        import time
+
+        observed = []
+
+        class Terminal(CLIModalMixin):
+            _app = None
+            _clarify_state = None
+
+            def _ring_bell(self, *args, **kwargs):
+                pass
+
+            def _paint_now(self):
+                pass
+
+            def _persist_prompt_summary(self, *args):
+                pass
+
+            def _poll_modal_queue(self, response_queue, deadline_attr, **kwargs):
+                observed.append(getattr(self, deadline_attr))
+                return super()._poll_modal_queue(response_queue, deadline_attr, **kwargs)
+
+        for budget in (0, 2, 1):
+            with self.subTest(budget=budget), mock.patch.dict(CLI_CONFIG, {"clarify": {"timeout": 3600}}):
+                before = copy.deepcopy(CLI_CONFIG)
+                terminal = Terminal()
+                plugin = load_plugin()
+                cancelled = threading.Event()
+
+                def telegram(*args, **kwargs):
+                    if budget != 1:
+                        return [["Telegram"]]
+                    if kwargs["cancel_event"].wait(3):
+                        cancelled.set()
+                    return None
+
+                adapter = plugin.HermesTelegramAdapter(ask=telegram)
+                start = time.monotonic()
+                with mock.patch("cli._cprint"):
+                    result = adapter._ask_with_terminal(terminal, [{"question": "Question?"}], [], {
+                        "session_id": "test", "timeout_seconds": budget,
+                    })
+                if budget == 1:
+                    self.assertEqual(result, {"answers": [[]], "outcome": "timed_out"})
+                    self.assertTrue(cancelled.is_set())
+                else:
+                    self.assertEqual(result, {"answers": [["Telegram"]], "outcome": "submitted"})
+                if budget == 0:
+                    self.assertIsNone(observed[-1])
+                else:
+                    self.assertAlmostEqual(observed[-1] - start, budget, delta=0.2)
+                self.assertEqual(CLI_CONFIG, before)
+                self.assertNotIn("_poll_modal_queue", vars(terminal))
+                self.assertIsNone(terminal._clarify_state)
 
     def test_real_hermes_cli_modal_resolves_from_either_channel(self) -> None:
         try:
@@ -397,6 +494,49 @@ class HermesPluginTests(unittest.TestCase):
                 self.assertEqual(result, [{"answers": [["예"]]}])
                 self.assertIn("[Hermes]", sent[0])
                 root.rmdir()
+
+    def test_registered_question_has_no_generic_executor_deadline(self) -> None:
+        try:
+            from tools.registry import registry
+            from agent.tool_dispatch_helpers import _extend_tool_timeout
+            from agent.tool_executor import _poll_sequential_future
+            from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+        except ImportError:
+            self.skipTest("Run with hermes --run-module unittest")
+        from concurrent.futures import Future
+        import math
+        import time
+
+        plugin = load_plugin()
+        name = "hermes_telegram_ask_user"
+        scope = registry.current_scope_key()
+        previous = registry.snapshot_registration(name, scope=scope)
+        manager = PluginManager(scope_key=scope)
+        ctx = PluginContext(PluginManifest(name="adapter-timeout-test"), manager)
+        try:
+            with (mock.patch.object(ctx, "register_hook"),
+                  mock.patch.object(ctx, "register_middleware"),
+                  mock.patch.object(ctx, "register_approval_transport")):
+                plugin.register(ctx)
+            entry = registry.snapshot_registration(name, scope=scope)
+            assert entry is not None and entry.execution_timeout is not None
+            self.assertTrue(math.isinf(entry.execution_timeout))
+            budget = _extend_tool_timeout(name, 0.01)
+            assert budget is not None
+            self.assertTrue(math.isinf(budget))
+            # Infinity is only arithmetic metadata: actual Future waits remain
+            # bounded, so neither overflow nor lost interrupt handling results.
+            future = Future()
+            agent = types.SimpleNamespace(_interrupt_requested=True)
+            gate = types.SimpleNamespace(excluded_seconds=lambda: 0)
+            with mock.patch("agent.tool_executor._SEQUENTIAL_INTERRUPT_POLL_SECONDS", 0.01):
+                self.assertEqual(_poll_sequential_future(
+                    agent, future, name, math.inf, time.monotonic(), gate,
+                ), ("interrupted", None))
+        finally:
+            for handle in reversed(manager._registration_order[:]):
+                handle.dispose()
+            self.assertIs(registry.snapshot_registration(name, scope=scope), previous)
 
     def test_register_wires_native_tool_hooks_and_transport(self) -> None:
         plugin = load_plugin()

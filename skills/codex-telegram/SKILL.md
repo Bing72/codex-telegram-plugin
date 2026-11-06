@@ -18,6 +18,8 @@ description: Use installed Codex bridge for configured Telegram choice questions
    session cannot receive the answer or the user explicitly requests Telegram.
 2. Provide one to three concise questions. Prefer two or three mutually
    exclusive options and keep custom input enabled when free text is useful.
+   Omit `timeout_seconds` (or use `0`) to wait until answered or cancelled.
+   Set a positive timeout only when the user requests a time limit.
 3. Never include tokens, credentials, private keys, or full secret-bearing
    command output in Telegram questions or notifications.
 4. Permission prompts are handled automatically by the plugin hook or Codex

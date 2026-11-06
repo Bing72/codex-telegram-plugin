@@ -1,6 +1,6 @@
 {
   "name": "codex-telegram-plugin",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Control Codex sessions, answer questions, and approve actions through a standalone Telegram receiver or a compatible external receiver.",
   "author": {
     "name": "Codex Telegram Contributors"

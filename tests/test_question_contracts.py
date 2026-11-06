@@ -27,7 +27,7 @@ from test_hermes_plugin import load_plugin
 class CodexQuestionContractTests(unittest.TestCase):
     def call(self, request_id=42):
         return dataclasses.replace(test_mcp_server.McpServerTests._call(),
-                                   request_id=request_id, timeout_seconds=2, progress=None)
+                                   request_id=request_id, timeout_seconds=0, progress=None)
 
     def service(self):
         with mock.patch.object(bridge, "load_telegram_config", return_value=mock.Mock()):
@@ -66,11 +66,29 @@ class CodexQuestionContractTests(unittest.TestCase):
                 }}})
 
     def test_question_timeout_matches_its_advertised_bounds(self):
-        for timeout in (-1, 0, 1, 86401, None, True, "30", 30.5):
+        for timeout in (-1, 86401, None, True, False, "30", 30.5):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "timeout_seconds"):
                 mcp_server._parse_ask_user_call({"id": 1, "params": {"name": "ask_user", "arguments": {
                     "timeout_seconds": timeout, "questions": [{"header": "q", "question": "q"}],
                 }}})
+
+    def test_question_timeout_defaults_to_unlimited_and_preserves_positive_values(self):
+        schema = mcp_server.TOOL["inputSchema"]["properties"]["timeout_seconds"]
+        self.assertEqual((schema["default"], schema["minimum"], schema["maximum"]),
+                         (0, 0, 86400))
+        with mock.patch.object(mcp_server, "resolve_session_name", return_value="test"):
+            for timeout in (None, 0, 1, 29, 30, 86400):
+                with self.subTest(timeout=timeout):
+                    arguments = {"questions": [{"header": "q", "question": "q"}]}
+                    if timeout is not None:
+                        arguments["timeout_seconds"] = timeout
+                    call = mcp_server._parse_ask_user_call({"id": 1, "params": {
+                        "name": "ask_user", "arguments": arguments,
+                    }})
+                    self.assertEqual(call.timeout_seconds, timeout or 0)
+                    with mock.patch.object(mcp_server, "ask_questions", return_value=[["answer"]]) as ask:
+                        mcp_server._telegram_answers(call)
+                    self.assertEqual(ask.call_args.kwargs["timeout_seconds"], timeout or 0)
 
     def test_native_free_text_rejects_missing_blank_or_non_text_values(self):
         form = mcp_server._elicitation_form(common.normalize_questions([

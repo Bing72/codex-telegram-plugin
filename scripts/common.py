@@ -37,7 +37,7 @@ DEFAULT_DATA_DIR = Path.home() / ".local/share/codex-telegram-plugin"
 DEFAULT_BRIDGE_HOST = "127.0.0.1"
 DEFAULT_BRIDGE_PORT = 43991
 RETENTION_MS = 7 * 24 * 60 * 60 * 1000
-QUESTION_TIMEOUT_SECONDS = 24 * 60 * 60
+QUESTION_TIMEOUT_SECONDS = 0  # Ordinary questions wait until answered or cancelled.
 PERMISSION_TIMEOUT_SECONDS = 570
 TERMINAL_EVENT_LIMIT = 6000
 REDACTION_MARKER = "[REDACTED]"
@@ -481,6 +481,17 @@ def read_pending_json(path: Path) -> dict[str, Any] | None:
             pass
         return None
     expires_at = value.get("expiresAt")
+    # Unlimited questions belong to a live waiter, not the retention sweeper.
+    # Avoid heartbeat writes, which could overwrite a concurrently submitted reply.
+    if type(expires_at) is int and expires_at == 0 and isinstance(value.get("questions"), list):
+        owner_pid = value.get("ownerPID")
+        if type(owner_pid) is int and owner_pid > 0:
+            try:
+                os.kill(owner_pid, 0)
+            except OSError:
+                pass
+            else:
+                return value
     if type(expires_at) is not int or expires_at <= int(time.time() * 1000):
         try:
             path.unlink()
@@ -1210,7 +1221,7 @@ def ask_questions(
         "ownerPID": os.getpid(),
         "questions": normalized,
         "sentAt": now_ms,
-        "expiresAt": now_ms + RETENTION_MS,
+        "expiresAt": 0 if timeout_seconds == 0 else now_ms + max(RETENTION_MS, int(timeout_seconds * 1000)),
         "telegramMessageIds": [message_id],
         "currentQuestionIndex": 0,
         "answersInProgress": [None for _ in normalized],
@@ -1234,9 +1245,9 @@ def ask_questions(
         terminal_details,
         state="Telegram과 현재 터미널에 표시됨 · Telegram 답변 대기",
     )
-    deadline = time.monotonic() + timeout_seconds
+    deadline = None if timeout_seconds == 0 else time.monotonic() + timeout_seconds
     try:
-        while time.monotonic() < deadline:
+        while deadline is None or time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
                 try:
                     edit_message(

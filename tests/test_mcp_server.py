@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import queue
 import sys
 import threading
 import time
@@ -352,6 +353,146 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(source, "telegram")
         self.assertEqual(answers, [["보임"]])
         self.assertTrue(elicitation_cancelled.wait(timeout=1))
+
+    def test_unlimited_elicitation_accepts_a_response_after_the_old_maximum(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        form = mcp_server._elicitation_form(self._call().questions, "session")
+        clock = [100.0]
+        response = {"result": {"action": "accept", "content": {"question_1": "보임"}}}
+        waiter = mock.Mock()
+        polls = []
+
+        def get(*, timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 0.2)
+            polls.append(timeout)
+            if len(polls) == 1:
+                clock[0] += 86401
+                raise queue.Empty
+            return response
+
+        waiter.get.side_effect = get
+        with (mock.patch.object(runtime, "_register_outbound", return_value=waiter),
+              mock.patch.object(mcp_server.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(mcp_server, "write_message") as write):
+            self.assertEqual(runtime._request_elicitation(
+                form, timeout_seconds=0, cancel_event=threading.Event()), response)
+        self.assertEqual(len(polls), 2)
+        self.assertEqual(write.call_count, 1)
+        self.assertEqual(runtime._outbound_waiters, {})
+
+    def test_unlimited_dual_channel_first_response_wins_after_the_old_maximum(self) -> None:
+        for winner in ("telegram", "codex"):
+            with self.subTest(winner=winner):
+                runtime = mcp_server.McpRuntime()
+                clock = [100.0]
+                workers = {}
+                cancelled = {}
+                completed = queue.Queue()
+                real_get = completed.get
+                polls = []
+
+                def thread(*, target, name, **kwargs):
+                    return mock.Mock(start=lambda: workers.__setitem__(name, target))
+
+                def telegram(call, cancel_event):
+                    self.assertEqual(call.timeout_seconds, 0)
+                    cancelled["telegram"] = cancel_event
+                    return [["Telegram"]]
+
+                def elicit(form, *, timeout_seconds, cancel_event):
+                    self.assertEqual(timeout_seconds, 0)
+                    cancelled["codex"] = cancel_event
+                    return {"result": {"action": "accept", "content": {"question_1": "보임"}}}
+
+                def get(*, timeout):
+                    self.assertGreater(timeout, 0)
+                    self.assertLessEqual(timeout, 0.2)
+                    polls.append(timeout)
+                    if len(polls) == 1:
+                        clock[0] += 86401
+                        raise queue.Empty
+                    order = ("telegram-question", "codex-elicitation")
+                    if winner == "codex":
+                        order = tuple(reversed(order))
+                    for name in order:
+                        workers[name]()
+                    return real_get(timeout=timeout)
+
+                with (mock.patch.object(mcp_server.threading, "Thread", side_effect=thread),
+                      mock.patch.object(mcp_server.time, "monotonic", side_effect=lambda: clock[0]),
+                      mock.patch.object(mcp_server.queue, "Queue", return_value=completed),
+                      mock.patch.object(completed, "get", side_effect=get),
+                      mock.patch.object(mcp_server, "_telegram_answers", side_effect=telegram),
+                      mock.patch.object(runtime, "_request_elicitation", side_effect=elicit)):
+                    self.assertEqual(runtime._answer_via_both_channels(
+                        replace(self._call(), timeout_seconds=0)),
+                        (winner, [["Telegram"]] if winner == "telegram" else [["보임"]]))
+                self.assertEqual(len(polls), 2)
+                self.assertTrue(all(event.is_set() for event in cancelled.values()))
+                self.assertEqual(completed.qsize(), 1)  # The losing answer cannot replace the winner.
+
+    def test_unlimited_elicitation_cancellation_retires_the_waiter(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        form = mcp_server._elicitation_form(self._call().questions, "session")
+        cancel_event = threading.Event()
+        clock = [100.0]
+
+        def get(*, timeout):
+            self.assertEqual(timeout, 0.2)
+            clock[0] += 86401
+            cancel_event.set()
+            raise queue.Empty
+
+        with (mock.patch.object(mcp_server.queue.Queue, "get", side_effect=get),
+              mock.patch.object(mcp_server.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(mcp_server, "write_message") as write):
+            with self.assertRaises(mcp_server.ElicitationCancelled):
+                runtime._request_elicitation(form, timeout_seconds=0, cancel_event=cancel_event)
+        self.assertEqual(runtime._outbound_waiters, {})
+        self.assertEqual(write.call_args.args[0]["method"], "notifications/cancelled")
+        self.assertEqual(write.call_args.args[0]["params"]["requestId"], 1)
+
+    def test_positive_elicitation_deadline_expires_without_negative_queue_timeouts(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        form = mcp_server._elicitation_form(self._call().questions, "session")
+        clock = [100.0]
+        polls = []
+
+        def get(*, timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 0.2)
+            polls.append(timeout)
+            clock[0] += 2
+            raise queue.Empty
+
+        with (mock.patch.object(mcp_server.queue.Queue, "get", side_effect=get),
+              mock.patch.object(mcp_server.time, "monotonic", side_effect=lambda: clock[0]),
+              mock.patch.object(mcp_server, "write_message") as write):
+            with self.assertRaisesRegex(TimeoutError, "elicitation timed out"):
+                runtime._request_elicitation(form, timeout_seconds=1, cancel_event=threading.Event())
+        self.assertEqual(len(polls), 1)
+        self.assertEqual(runtime._outbound_waiters, {})
+        self.assertEqual(write.call_args.args[0]["method"], "notifications/cancelled")
+
+    def test_positive_dual_channel_deadline_still_expires(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        clock = [100.0]
+        polls = []
+
+        def get(*, timeout):
+            self.assertGreater(timeout, 0)
+            self.assertLessEqual(timeout, 0.2)
+            polls.append(timeout)
+            clock[0] += 2
+            raise queue.Empty
+
+        with (mock.patch.object(mcp_server.threading, "Thread"),
+              mock.patch.object(mcp_server.queue.Queue, "get", side_effect=get),
+              mock.patch.object(mcp_server.time, "monotonic", side_effect=lambda: clock[0])):
+            with self.assertRaisesRegex(TimeoutError, "Telegram and Codex question timed out"):
+                runtime._answer_via_both_channels(replace(self._call(), timeout_seconds=1))
+        self.assertEqual(len(polls), 1)
 
     def test_runtime_routes_elicitation_response_to_its_pending_request(self) -> None:
         runtime = mcp_server.McpRuntime()

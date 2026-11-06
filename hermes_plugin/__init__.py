@@ -129,6 +129,9 @@ class HermesTelegramAdapter:
             return
 
     def ask_user(self, args: dict[str, Any], **kwargs: Any) -> str:
+        timeout = args.get("timeout_seconds", 0)
+        if type(timeout) is not int or not 0 <= timeout <= 86400:
+            return json.dumps({"error": "timeout_seconds must be an integer from 0 to 86400"})
         questions = args.get("questions")
         if not isinstance(questions, list) or not 1 <= len(questions) <= 5:
             return json.dumps({"error": "questions must contain 1–5 items"})
@@ -170,7 +173,7 @@ class HermesTelegramAdapter:
             ask_kwargs = dict(
                 session_id=session_id,
                 session_name=self._session_name(session_id),
-                timeout_seconds=min(max(int(args.get("timeout_seconds", 3600)), 1), 86400),
+                timeout_seconds=timeout,
                 request_id=f"hermes-question-{uuid.uuid4().hex}",
                 agent_name="Hermes",
             )
@@ -293,18 +296,15 @@ class HermesTelegramAdapter:
     def _ask_with_viewer(self, viewer: Any, questions: list, converted: list, ask_kwargs: dict) -> list | dict:
         """Race Telegram with the gateway's own CLI/TUI clarify request."""
         from gateway.session_server_requests import ask_viewer_result
-        from tools.clarify_gateway import get_clarify_timeout
 
         live, agent = viewer
         normalized = self._terminal_questions(questions)
         cancel = threading.Event()
         completed: queue.Queue = queue.Queue()
         timeout = ask_kwargs["timeout_seconds"]
-        native_timeout = get_clarify_timeout()
-        if native_timeout > 0:
-            native_timeout = min(native_timeout, timeout)
-        else:
-            native_timeout = timeout
+        # The gateway treats None (not 0) as unlimited. Only this tool's
+        # explicit budget owns the request; native clarify config is unrelated.
+        native_timeout = timeout or None
 
         def interrupted() -> bool:
             return bool(getattr(agent, "_interrupt_requested", False))
@@ -337,15 +337,16 @@ class HermesTelegramAdapter:
         ) for source, callback in (("terminal", native), ("telegram", telegram))]
         for worker in workers:
             worker.start()
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + timeout if timeout > 0 else None
         errors = []
         remaining = len(workers)
         try:
-            while remaining and time.monotonic() < deadline:
+            while remaining and (deadline is None or time.monotonic() < deadline):
                 if interrupted():
                     cancel.set()
                 try:
-                    source, result = completed.get(timeout=min(0.1, max(deadline - time.monotonic(), 0.001)))
+                    wait = 0.1 if deadline is None else min(0.1, max(deadline - time.monotonic(), 0.001))
+                    source, result = completed.get(timeout=wait)
                 except queue.Empty:
                     continue
                 remaining -= 1
@@ -368,6 +369,23 @@ class HermesTelegramAdapter:
         normalized = self._terminal_questions(questions)
         cancel = threading.Event()
         previous = getattr(terminal, "_clarify_state", None)
+        timeout = ask_kwargs["timeout_seconds"]
+        deadline = time.monotonic() + timeout if timeout > 0 else None
+        poll = getattr(terminal, "_poll_modal_queue", None)
+        missing = object()
+        saved_poll = vars(terminal).get("_poll_modal_queue", missing)
+
+        def poll_question(response_queue: Any, deadline_attr: str, **kwargs: Any) -> Any:
+            # Installed CLIModalMixin has no per-call timeout argument. Override
+            # only this instance's exact clarify queue at its synchronous wait
+            # boundary, after the callback initialized its configured deadline.
+            # Never change CLI_CONFIG, another modal, or any security prompt.
+            state = getattr(terminal, "_clarify_state", None)
+            if (deadline_attr == "_clarify_deadline" and state is not None
+                    and state is not previous and state.get("response_queue") is response_queue):
+                terminal._clarify_deadline = deadline
+            assert callable(poll)
+            return poll(response_queue, deadline_attr, **kwargs)
 
         def receive() -> None:
             # Capture this modal's identity before sending; a late reply must
@@ -413,10 +431,17 @@ class HermesTelegramAdapter:
         worker = threading.Thread(target=contextvars.copy_context().run, args=(receive,), daemon=True)
         worker.start()
         try:
+            if callable(poll):
+                terminal._poll_modal_queue = poll_question
             reply = terminal._clarify_callback(normalized)
             return {"answers": self._terminal_answers(normalized, reply),
                     "outcome": reply.get("outcome", "submitted")}
         finally:
+            if callable(poll) and vars(terminal).get("_poll_modal_queue") is poll_question:
+                if saved_poll is missing:
+                    del terminal._poll_modal_queue
+                else:
+                    terminal._poll_modal_queue = saved_poll
             cancel.set()
             worker.join(timeout=2)
 
@@ -485,6 +510,8 @@ class HermesTelegramAdapter:
             "일반 사용자 질문은 hermes_telegram_ask_user 도구를 사용해 Telegram과 "
             "터미널에 함께 표시하세요. 질문은 한 번에 최대 5개입니다. "
             "대화형 CLI에서는 터미널에서도 선택할 수 있고 먼저 제출된 답변을 사용합니다. "
+            "기본은 무제한 대기입니다. 사용자가 제한 시간을 요청하지 않으면 "
+            "timeout_seconds를 생략하거나 0으로 두세요. "
             "전송에 실패하면 Hermes 기본 clarify를 사용하세요. "
             "비밀번호, API 키, 인증 코드와 로그인은 Hermes의 기본 보안 입력 절차를 사용하세요. "
             "위험한 명령의 승인은 도구 질문이 아니라 Hermes 승인 절차를 따르세요."
@@ -522,10 +549,21 @@ def register(ctx: Any) -> None:
                             },
                         },
                     },
-                    "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 86400},
+                    "timeout_seconds": {"type": "integer", "minimum": 0, "maximum": 86400,
+                                        "default": 0, "description": "0 waits indefinitely; positive values limit the question in seconds."},
                 },
                 "required": ["questions"],
             },
         },
         handler=adapter.ask_user,
     )
+    # PluginContext.register_tool currently does not expose execution_timeout.
+    # Set metadata only on the exact profile-scoped entry this adapter owns,
+    # retaining the host's registration/unload lease and interruptible polling.
+    scope = getattr(getattr(ctx, "_manager", None), "scope_key", None)
+    if isinstance(scope, str):
+        from tools.registry import registry
+
+        entry = registry.snapshot_registration("hermes_telegram_ask_user", scope=scope)
+        if entry is not None and entry.handler == adapter.ask_user:
+            entry.execution_timeout = float("inf")

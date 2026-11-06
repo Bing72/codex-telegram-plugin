@@ -73,6 +73,46 @@ def make_config(label: str) -> common.TelegramConfig:
 
 
 class CommonTests(unittest.TestCase):
+    def test_unlimited_question_survives_retention_and_accepts_reply(self) -> None:
+        config = make_config("unlimited")
+        with tempfile.TemporaryDirectory() as directory:
+            pending = Path(directory)
+            clock = [100.0]
+
+            def answer_after_retention(_seconds):
+                clock[0] += common.RETENTION_MS / 1000 + 1
+                path = next(pending.glob("*.json"))
+                payload = common.read_pending_json(path)
+                self.assertIsNotNone(payload)
+                payload["answersInProgress"] = [["yes"]]
+                payload["submittedAt"] = int(clock[0] * 1000)
+                common.atomic_write_json(path, payload)
+
+            with (
+                mock.patch.object(common, "pending_question_dir", return_value=pending),
+                mock.patch.object(common, "send_message", return_value=1),
+                mock.patch.object(common, "edit_message"),
+                mock.patch.object(common, "mirror_terminal_event"),
+                mock.patch.object(common.time, "monotonic", side_effect=lambda: clock[0]),
+                mock.patch.object(common.time, "time", side_effect=lambda: clock[0]),
+                mock.patch.object(common.time, "sleep", side_effect=answer_after_retention),
+            ):
+                self.assertEqual(common.ask_questions(
+                    [{"question": "Continue?"}], session_id="unlimited",
+                    server_url="http://127.0.0.1:43991/", config=config,
+                ), [["yes"]])
+            self.assertEqual(list(pending.glob("*.json")), [])
+
+    def test_unlimited_question_without_live_owner_is_cleaned_up(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "orphan.json"
+            common.atomic_write_json(path, {
+                "expiresAt": 0, "questions": [{"question": "Continue?"}], "ownerPID": 12345,
+            })
+            with mock.patch.object(common.os, "kill", side_effect=ProcessLookupError):
+                self.assertIsNone(common.read_pending_json(path))
+            self.assertFalse(path.exists())
+
     def test_bounded_json_body_rejects_negative_and_oversized_lengths(self) -> None:
         handler = mock.Mock()
         handler.rfile = io.BytesIO(b'{}')
@@ -744,7 +784,7 @@ class CommonTests(unittest.TestCase):
                     [{"header": "선택", "question": "어떻게 할까요?", "options": ["A"]}],
                     session_id="hermes-1",
                     server_url="http://127.0.0.1:43991/",
-                    timeout_seconds=0,
+                    timeout_seconds=0.001,
                     config=config,
                     session_name="Hermes · 작업",
                     agent_name="Hermes",
@@ -772,7 +812,7 @@ class CommonTests(unittest.TestCase):
                     ],
                     session_id="thread-timeout",
                     server_url="http://127.0.0.1:43991/",
-                    timeout_seconds=0,
+                    timeout_seconds=0.001,
                     config=config,
                     session_name="만료 테스트",
                 )
@@ -808,7 +848,7 @@ class CommonTests(unittest.TestCase):
                 ],
                 session_id="thread-cancel",
                 server_url="http://127.0.0.1:43991/",
-                timeout_seconds=5,
+                timeout_seconds=0,
                 config=config,
                 session_name="동기화 테스트",
                 cancel_event=cancelled,
