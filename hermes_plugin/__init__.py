@@ -522,7 +522,10 @@ def register(ctx: Any) -> None:
     adapter = HermesTelegramAdapter()
     ctx.register_hook("post_llm_call", adapter.on_response)
     ctx.register_hook("on_session_end", adapter.on_end)
-    ctx.register_hook("pre_llm_call", adapter.question_guidance)
+    # Static tool policy belongs in the session prompt, not after each user message.
+    ctx.register_system_prompt_section(
+        "codex-telegram.question-guidance", adapter.question_guidance(),
+    )
     register_middleware = getattr(ctx, "register_middleware", None)
     if callable(register_middleware):
         register_middleware("tool_execution", adapter.mirror_clarify)

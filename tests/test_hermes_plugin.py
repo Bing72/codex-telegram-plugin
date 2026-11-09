@@ -544,7 +544,11 @@ class HermesPluginTests(unittest.TestCase):
         plugin.register(ctx)
         self.assertEqual(
             [args.args[0] for args in ctx.register_hook.call_args_list],
-            ["post_llm_call", "on_session_end", "pre_llm_call"],
+            ["post_llm_call", "on_session_end"],
+        )
+        ctx.register_system_prompt_section.assert_called_once_with(
+            "codex-telegram.question-guidance",
+            plugin.HermesTelegramAdapter.question_guidance(),
         )
         self.assertEqual(ctx.register_tool.call_args.kwargs["name"], "hermes_telegram_ask_user")
         self.assertEqual(ctx.register_approval_transport.call_args.args[0], "codex-telegram")
