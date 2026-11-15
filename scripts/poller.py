@@ -325,13 +325,6 @@ class StandaloneTelegramPoller:
             self._safe_delete(awaiting.get("promptMessageId"))
 
         if selection == "c":
-            self._safe_edit(
-                message_id,
-                self._question_status_text(
-                    pending,
-                    "✏️ 다음 메시지에 답변을 입력하세요.",
-                ),
-            )
             prompt_id = send_message(
                 self.config,
                 "직접 답변을 입력하세요.",
@@ -348,6 +341,13 @@ class StandaloneTelegramPoller:
                 "promptMessageId": prompt_id,
             }
             self._save_question(path, pending)
+            self._safe_edit(
+                message_id,
+                self._question_status_text(
+                    pending,
+                    "✏️ 다음 메시지에 답변을 입력하세요. 여러 질문이 대기 중이면 입력 안내에 답장하세요.",
+                ),
+            )
             return
 
         if selection == "d":
@@ -398,9 +398,10 @@ class StandaloneTelegramPoller:
         text: str,
         chat_id: int,
         user_id: int,
-        reply_to_message_id: int,
+        reply_to_message_id: int | None,
     ) -> bool:
         root = pending_question_dir(self.config)
+        matches: list[tuple[Path, dict[str, Any], dict[str, Any]]] = []
         for path in root.glob("*.json") if root.is_dir() else []:
             pending = read_pending_json(path)
             if pending is None or isinstance(pending.get("submittedAt"), int):
@@ -411,9 +412,20 @@ class StandaloneTelegramPoller:
             if (
                 awaiting.get("chatId") != chat_id
                 or awaiting.get("userId") != user_id
-                or awaiting.get("promptMessageId") != reply_to_message_id
             ):
                 continue
+            if reply_to_message_id is not None and awaiting.get("promptMessageId") != reply_to_message_id:
+                continue
+            matches.append((path, pending, awaiting))
+
+        # A plain message is safe to associate only when there is one possible
+        # recipient. Explicit replies remain usable with concurrent questions.
+        if len(matches) != 1:
+            if len(matches) > 1 and reply_to_message_id is None:
+                send_message(self.config, "여러 질문이 답변을 기다립니다. 해당 입력 안내 메시지에 답장해 주세요.")
+                return True
+            return False
+        for path, pending, awaiting in matches:
             index = int(awaiting.get("questionIndex", -1))
             questions = pending.get("questions")
             answers = pending.get("answersInProgress")
@@ -706,11 +718,11 @@ class StandaloneTelegramPoller:
         user_id = int(message["from"]["id"])
         reply = message.get("reply_to_message")
         reply_id = reply.get("message_id") if isinstance(reply, dict) else None
-        if isinstance(reply_id, int) and self._handle_custom_answer(
+        if (isinstance(reply_id, int) or not text.strip().startswith("/")) and self._handle_custom_answer(
             text,
             chat_id,
             user_id,
-            reply_id,
+            reply_id if isinstance(reply_id, int) else None,
         ):
             return
         match = COMMAND_RE.match(text.strip())

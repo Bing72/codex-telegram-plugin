@@ -259,6 +259,41 @@ class StandalonePollerTests(unittest.TestCase):
             path.unlink()
             pending_dir.rmdir()
 
+    def test_custom_answer_plain_message_and_concurrent_questions(self) -> None:
+        config = make_config("custom-plain")
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_poller(config, Path(directory))
+            pending_dir = common.pending_question_dir(config)
+            pending_dir.mkdir(parents=True, exist_ok=True)
+            paths = [pending_dir / "codex.json", pending_dir / "hermes.json"]
+            for path, agent, prompt in zip(paths, ("Codex", "Hermes"), (20, 21)):
+                common.atomic_write_json(path, {
+                    "agentName": agent,
+                    "questions": [{"question": "답변하세요", "options": [], "multiple": False}],
+                    "answersInProgress": [None], "telegramMessageIds": [10],
+                    "awaitingCustomFor": {"chatId": 42, "userId": 42, "promptMessageId": prompt, "questionIndex": 0},
+                    "expiresAt": int(time.time() * 1000) + 60_000,
+                })
+            message = {"from": {"id": 42}, "chat": {"id": 42, "type": "private"}, "text": "직접 답변"}
+            with mock.patch.object(service, "_safe_edit"), mock.patch.object(poller, "send_message") as send:
+                service._handle_message(message)
+                self.assertIn("여러 질문", send.call_args.args[1])
+                self.assertEqual(common.read_json(paths[0])["answersInProgress"], [None])
+                self.assertEqual(common.read_json(paths[1])["answersInProgress"], [None])
+                message["reply_to_message"] = {"message_id": 21}
+                service._handle_message(message)
+                self.assertEqual(common.read_json(paths[1])["answersInProgress"], [["직접 답변"]])
+                del message["reply_to_message"]
+                message["text"] = "/help"
+                service._handle_message(message)
+                self.assertEqual(common.read_json(paths[0])["answersInProgress"], [None])
+                message["text"] = "다른 답변"
+                service._handle_message(message)
+                self.assertEqual(common.read_json(paths[0])["answersInProgress"], [["다른 답변"]])
+            for path in paths:
+                path.unlink()
+            pending_dir.rmdir()
+
     def test_sessions_command_saves_numbered_codex_snapshot(self) -> None:
         config = make_config("sessions")
         with tempfile.TemporaryDirectory() as directory:
