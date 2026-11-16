@@ -165,6 +165,7 @@ def progress_message(
     questions: list[dict[str, Any]],
     *,
     state: str,
+    answers: list[list[str]] | None = None,
 ) -> str:
     lines = [f"🧵 세션: {session_name}", f"요청 ID: {short_hash}", ""]
     for index, question in enumerate(questions, start=1):
@@ -175,6 +176,8 @@ def progress_message(
         ]
         if labels:
             lines.append(f"   선택지: {', '.join(labels)}")
+        if answers is not None and index <= len(answers):
+            lines.append(f"   답변: {', '.join(answers[index - 1]) or '(빈 답변)'}")
     lines.extend(["", f"상태: {state}"])
     return redact_sensitive_text("\n".join(lines))
 
@@ -442,7 +445,8 @@ def _telegram_answers(call: AskUserCall, cancel_event: threading.Event | None = 
     )
 
 
-def _report_progress(call: AskUserCall, *, progress: int, state: str) -> None:
+def _report_progress(call: AskUserCall, *, progress: int, state: str,
+                     answers: list[list[str]] | None = None) -> None:
     write_progress(
         call.progress,
         progress=progress,
@@ -451,6 +455,7 @@ def _report_progress(call: AskUserCall, *, progress: int, state: str) -> None:
             call.short_hash,
             call.questions,
             state=state,
+            answers=answers,
         ),
     )
 
@@ -489,7 +494,7 @@ def handle(
             raise
         if answers is None:
             raise TimeoutError("Telegram question was cancelled")
-        _report_progress(call, progress=1, state="Telegram 답변을 Codex에 전달함")
+        _report_progress(call, progress=1, state="Telegram 답변을 Codex에 전달함", answers=answers)
         return _tool_result(call.request_id, answers)
     if request_id is None:
         return None
@@ -679,7 +684,7 @@ class McpRuntime:
                 answers = _telegram_answers(call, cancel_event)
                 if answers is None:
                     raise QuestionCancelled("Telegram question was cancelled")
-                _report_progress(call, progress=1, state="Telegram 답변을 Codex에 전달함")
+                _report_progress(call, progress=1, state="Telegram 답변을 Codex에 전달함", answers=answers)
                 response = _tool_result(call.request_id, answers)
             else:
                 _report_progress(call, progress=0, state="Telegram·Codex 선택지 답변 대기")
@@ -689,7 +694,7 @@ class McpRuntime:
                     if source == "telegram"
                     else "Codex 선택지 답변을 Telegram 질문과 동기화함"
                 )
-                _report_progress(call, progress=1, state=state)
+                _report_progress(call, progress=1, state=state, answers=answers)
                 response = _tool_result(call.request_id, answers)
         except QuestionCancelled as exc:
             if call is not None:

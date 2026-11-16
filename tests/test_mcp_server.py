@@ -100,6 +100,7 @@ class McpServerTests(unittest.TestCase):
         self.assertIn("세션에도 이 질문이 보이나요?", first["params"]["message"])
         self.assertIn("선택지: 보임, 안 보임", first["params"]["message"])
         self.assertEqual(notifications[1]["params"]["progress"], 1)
+        self.assertIn("답변: 보임", notifications[1]["params"]["message"])
         self.assertEqual(ask.call_args.kwargs["session_id"], "thread-from-codex")
         self.assertEqual(ask.call_args.kwargs["session_name"], "표시 점검 세션")
         self.assertTrue(

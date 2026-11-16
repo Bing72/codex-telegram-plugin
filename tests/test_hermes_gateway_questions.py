@@ -91,7 +91,7 @@ class HermesGatewayQuestionTests(unittest.TestCase):
                 self.assertEqual(result, {"answers": [["native"]], "outcome": "submitted"})
                 self.assertEqual(native.call_args.kwargs["timeout"], budget or None)
                 self.assertTrue(cancelled.is_set())
-                self.assertFalse(self.requests.open_requests(live.event_stream, "session-1"))
+                self.assertFalse(self.requests.waiting(live.event_stream, "session-1", "clarify"))
 
     def test_gateway_question_is_shown_to_the_attached_terminal(self) -> None:
         plugin = load_plugin()
@@ -115,7 +115,7 @@ class HermesGatewayQuestionTests(unittest.TestCase):
         while not closed() and time.monotonic() < deadline:
             time.sleep(0.005)
         self.assertTrue(closed())
-        self.assertFalse(self.requests.open_requests(live.event_stream, "session-1"))
+        self.assertFalse(self.requests.waiting(live.event_stream, "session-1", "clarify"))
 
     def test_real_cli_panel_can_answer_gateway_question_even_when_telegram_fails(self) -> None:
         from hermes_cli.cli_modal_mixin import CLIModalMixin
@@ -210,7 +210,7 @@ class HermesGatewayQuestionTests(unittest.TestCase):
                 self.assertIsNone(terminal._clarify_state)
                 if not telegram_fails:
                     self.assertTrue(cancelled.is_set())
-                self.assertFalse(self.requests.open_requests(live.event_stream, "session-1"))
+                self.assertFalse(self.requests.waiting(live.event_stream, "session-1", "clarify"))
 
     def test_a_child_session_cannot_open_its_parents_terminal_panel(self) -> None:
         plugin = load_plugin()
@@ -264,7 +264,7 @@ class HermesGatewayQuestionTests(unittest.TestCase):
             result = self.run_question(adapter, live, [{"question": "입력?"}], timeout_seconds=0)
         self.assertEqual(result, {"answers": [[]], "outcome": "cancelled"})
         self.assertTrue(cancelled.is_set())
-        self.assertFalse(self.requests.open_requests(live.event_stream, "session-1"))
+        self.assertFalse(self.requests.waiting(live.event_stream, "session-1", "clarify"))
 
     def test_same_session_id_in_another_profile_cannot_receive_the_question(self) -> None:
         from gateway import session_authorities

@@ -414,6 +414,15 @@ class HermesTelegramAdapter:
                         q["qid"]: (answer if q["multi_select"] else (answer[0] if answer else None))
                         for q, answer in zip(normalized, answers)
                     }
+                    persist = getattr(terminal, "_persist_prompt_summary", None)
+                    if callable(persist):
+                        for q, answer in zip(normalized, answers):
+                            displayed = (json.dumps(answer, ensure_ascii=False) if q["multi_select"]
+                                         else (answer[0] if answer else ""))
+                            try:
+                                persist("?", "Clarify · Telegram", q["question"], displayed)
+                            except Exception:
+                                _LOG.warning("Could not display the Telegram answer in the terminal")
                     terminal._clarify_teardown()
                     state["response_queue"].put(True)
 

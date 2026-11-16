@@ -172,6 +172,34 @@ class HermesPluginTests(unittest.TestCase):
                 self.assertNotIn("_poll_modal_queue", vars(terminal))
                 self.assertIsNone(terminal._clarify_state)
 
+    def test_telegram_selection_is_recorded_in_terminal_summary(self) -> None:
+        plugin = load_plugin()
+
+        class Terminal:
+            _app = None
+            _clarify_state = None
+
+            def __init__(self):
+                self.summary = mock.Mock()
+                self._persist_prompt_summary = self.summary
+
+            def _clarify_callback(self, questions):
+                state = {"answers": {}, "response_queue": queue.Queue()}
+                self._clarify_state = state
+                state["response_queue"].get(timeout=2)
+                return {"answers": state["answers"], "outcome": "submitted"}
+
+            def _clarify_teardown(self):
+                self._clarify_state = None
+
+        terminal = Terminal()
+        adapter = plugin.HermesTelegramAdapter(ask=lambda *args, **kwargs: [["선택"]])
+        result = adapter._ask_with_terminal(terminal, [{"question": "어느 쪽?", "choices": ["선택"]}], [], {
+            "session_id": "test", "timeout_seconds": 2,
+        })
+        self.assertEqual(result, {"answers": [["선택"]], "outcome": "submitted"})
+        terminal.summary.assert_called_once_with("?", "Clarify · Telegram", "어느 쪽?", "선택")
+
     def test_real_hermes_cli_modal_resolves_from_either_channel(self) -> None:
         try:
             from hermes_cli.cli_modal_mixin import CLIModalMixin
