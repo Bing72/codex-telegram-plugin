@@ -12,7 +12,6 @@ import signal
 import socket
 import stat
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -40,6 +39,7 @@ from common import (  # noqa: E402
     pending_question_dir,
     read_json,
     read_pending_json,
+    shared_temp_dir,
     redact_sensitive_text,
     redact_telegram_markup,
     runtime_mode,
@@ -59,7 +59,7 @@ class PollingLock:
     """Keep a single polling host for each configured bot token."""
 
     def __init__(self, config: TelegramConfig) -> None:
-        self.path = Path(tempfile.gettempdir()) / f"codex-telegram-{config.token_hash}.lock"
+        self.path = shared_temp_dir() / f"codex-telegram-{config.token_hash}.lock"
         self.owned = False
 
     def _existing_is_live(self) -> bool:

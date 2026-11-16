@@ -220,11 +220,10 @@ Set `CODEX_TELEGRAM_TERMINAL_MIRROR=0` for a headless process that should not
 write terminal mirror events.
 
 Cooperating shared receivers must use the same runtime paths as the plugin:
-pending questions and permissions are stored under Python's
-`tempfile.gettempdir()` in `codex-telegram-pending-questions-<token_hash>` and
+pending questions and permissions are stored under `/tmp` on POSIX hosts where
+it exists, otherwise Python's `tempfile.gettempdir()`, in `codex-telegram-pending-questions-<token_hash>` and
 `codex-telegram-pending-permissions-<token_hash>` directories. The polling lock
-is `codex-telegram-<token_hash>.lock` in the same temporary directory, not a
-hardcoded OS-specific path. Session control goes directly through the loopback
+is `codex-telegram-<token_hash>.lock` in the same shared directory. Session control goes directly through the loopback
 bridge; no shared session registry is required.
 
 ## Verification

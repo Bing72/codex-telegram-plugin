@@ -204,7 +204,9 @@ and receiver; it never creates a second polling consumer.
 - Pending files use mode `0600`; their directories use `0700`.
 - Pending questions and permissions use `codex-telegram-pending-questions-<token_hash>`
   and `codex-telegram-pending-permissions-<token_hash>` directories under
-  Python's `tempfile.gettempdir()`. The token-scoped polling lock is
+  `/tmp` on POSIX hosts where it exists, otherwise Python's `tempfile.gettempdir()`.
+  This shared location does not change with process-specific `TMPDIR` settings.
+  The token-scoped polling lock is
   `codex-telegram-<token_hash>.lock` in the same temporary directory.
 - User-visible Telegram text and default runtime errors pass through a
   credential and private-path redaction boundary.

@@ -631,7 +631,7 @@ class CommonTests(unittest.TestCase):
 
     def test_pending_paths_use_the_codex_namespace(self) -> None:
         config = make_config("pending-namespace")
-        root = Path(tempfile.gettempdir())
+        root = common.shared_temp_dir()
         self.assertEqual(
             common.pending_question_dir(config),
             root / f"codex-telegram-pending-questions-{config.token_hash}",

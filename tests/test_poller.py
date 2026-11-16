@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sys
+import os
+import json
+import subprocess
 import tempfile
 import threading
 import time
@@ -259,6 +262,54 @@ class StandalonePollerTests(unittest.TestCase):
             path.unlink()
             pending_dir.rmdir()
 
+    @unittest.skipUnless(os.name == "posix" and Path("/tmp").is_dir(), "POSIX shared temp path")
+    def test_question_roundtrip_when_sender_has_a_different_tmpdir(self) -> None:
+        config = make_config("different-tmpdir")
+        child_code = '''
+import json, sys
+from unittest import mock
+import common
+config = common.TelegramConfig(sys.argv[1], 42, (42,), None)
+with mock.patch.object(common, "send_message", return_value=10), \\
+     mock.patch.object(common, "edit_message"), \\
+     mock.patch.object(common, "mirror_terminal_event"):
+    answers = common.ask_questions([{"question": "Choose", "options": ["Yes"]}],
+        session_id="session", server_url="http://127.0.0.1:1", config=config, timeout_seconds=5)
+    print(json.dumps(answers), flush=True)
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            service = self.make_poller(config, Path(directory))
+            env = dict(os.environ, TMPDIR=directory, PYTHONPATH=str(ROOT / "scripts"))
+            child = subprocess.Popen([sys.executable, "-c", child_code, config.bot_token],
+                                     env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            pending_dir = common.pending_question_dir(config)
+            try:
+                deadline = time.monotonic() + 5
+                paths = []
+                while time.monotonic() < deadline:
+                    paths = list(pending_dir.glob("*.json"))
+                    if paths:
+                        break
+                    if child.poll() is not None:
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(len(paths), 1, "sender did not create a shared pending question")
+                match = poller.CALLBACK_QUESTION_RE.match(f"q:{paths[0].stem}:0:0")
+                assert match is not None
+                with mock.patch.object(service, "_safe_edit"):
+                    service._handle_question_callback(match, 10, 42, 42)
+                stdout, stderr = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 0, stderr)
+                self.assertEqual(json.loads(stdout), [["Yes"]])
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.communicate()
+                for path in pending_dir.glob("*.json"):
+                    path.unlink()
+                if pending_dir.exists():
+                    pending_dir.rmdir()
+
     def test_custom_answer_plain_message_and_concurrent_questions(self) -> None:
         config = make_config("custom-plain")
         with tempfile.TemporaryDirectory() as directory:
@@ -329,7 +380,7 @@ class StandalonePollerTests(unittest.TestCase):
         lock = poller.PollingLock(config)
         self.assertEqual(
             lock.path,
-            Path(tempfile.gettempdir()) / f"codex-telegram-{config.token_hash}.lock",
+            common.shared_temp_dir() / f"codex-telegram-{config.token_hash}.lock",
         )
 
     def test_token_scoped_lock_allows_only_one_owner(self) -> None:

@@ -1063,14 +1063,21 @@ def permission_short_hash(
     return _short_hash(f"{server_url}:{endpoint}:{session_id}:{request_id}")
 
 
+def shared_temp_dir() -> Path:
+    """Use one host-wide rendezvous directory even if callers set different TMPDIRs."""
+    if os.name == "posix" and Path("/tmp").is_dir():
+        return Path("/tmp")
+    return Path(tempfile.gettempdir())
+
+
 def pending_question_dir(config: TelegramConfig) -> Path:
-    return Path(tempfile.gettempdir()) / (
+    return shared_temp_dir() / (
         f"codex-telegram-pending-questions-{config.token_hash}"
     )
 
 
 def pending_permission_dir(config: TelegramConfig) -> Path:
-    return Path(tempfile.gettempdir()) / (
+    return shared_temp_dir() / (
         f"codex-telegram-pending-permissions-{config.token_hash}"
     )
 
