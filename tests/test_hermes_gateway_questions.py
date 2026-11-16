@@ -117,6 +117,64 @@ class HermesGatewayQuestionTests(unittest.TestCase):
         self.assertTrue(closed())
         self.assertFalse(self.requests.waiting(live.event_stream, "session-1", "clarify"))
 
+    def test_telegram_answer_withdraws_real_gateway_terminal_modal(self) -> None:
+        from hermes_cli.cli_modal_mixin import CLIModalMixin
+        from hermes_cli.gateway_agent import GatewayAgent
+
+        class Terminal(CLIModalMixin):
+            _app = None
+            _clarify_state = None
+
+            def _ring_bell(self, *args, **kwargs):
+                pass
+
+            def _paint_now(self):
+                pass
+
+            def _persist_prompt_summary(self, *args):
+                pass
+
+        terminal = Terminal()
+        agent = object.__new__(GatewayAgent)
+        agent._open_request = None
+        agent.clarify_callback = terminal._clarify_callback
+        agent.modal_withdraw_callback = terminal._withdraw_gateway_modal
+        agent.connection = types.SimpleNamespace(reply=mock.Mock())
+        panel_open = threading.Event()
+        modal_done = threading.Event()
+
+        def on_question(frame):
+            def run_modal():
+                try:
+                    agent._answer_request(frame)
+                finally:
+                    modal_done.set()
+            threading.Thread(target=run_modal, daemon=True).start()
+
+        live, frames, ready = self.make_viewer(on_question)
+        def observe(frame):
+            params = frame.get("params", {})
+            if params.get("type") == "request.cancel":
+                agent._on_request_withdrawn(params.get("payload", {}))
+        live.event_stream.observers.add(observe)
+
+        def telegram(_questions, **kwargs):
+            self.assertTrue(ready.wait(1))
+            deadline = time.monotonic() + 2
+            while terminal._clarify_state is None and time.monotonic() < deadline:
+                time.sleep(0.005)
+            self.assertIsNotNone(terminal._clarify_state)
+            self.assertFalse(modal_done.is_set())
+            panel_open.set()
+            return [["예"]]
+
+        adapter = load_plugin().HermesTelegramAdapter(ask=telegram)
+        result = self.run_question(adapter, live, [{"question": "진행?", "choices": ["예", "아니오"]}])
+        self.assertEqual(result, {"answers": [["예"]]})
+        self.assertTrue(panel_open.is_set())
+        self.assertTrue(modal_done.wait(2))
+        self.assertIsNone(terminal._clarify_state)
+
     def test_real_cli_panel_can_answer_gateway_question_even_when_telegram_fails(self) -> None:
         from hermes_cli.cli_modal_mixin import CLIModalMixin
         from hermes_cli.gateway_agent import clarify_reply

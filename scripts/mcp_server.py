@@ -658,6 +658,11 @@ class McpRuntime:
                 if isinstance(outcome, QuestionCancelled):
                     raise outcome
                 if isinstance(outcome, list):
+                    if source == "telegram":
+                        # Retire the native form before reporting the outer tool
+                        # result, so a client does not leave its modal behind.
+                        elicitation_cancel.set()
+                        completed_workers["codex"].wait(2)
                     return source, outcome
                 errors.append(outcome)
             if errors:

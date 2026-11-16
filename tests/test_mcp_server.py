@@ -355,6 +355,42 @@ class McpServerTests(unittest.TestCase):
         self.assertEqual(answers, [["보임"]])
         self.assertTrue(elicitation_cancelled.wait(timeout=1))
 
+    def test_telegram_answer_closes_form_before_returning_result(self) -> None:
+        runtime = mcp_server.McpRuntime()
+        form_open = threading.Event()
+        send_answer = threading.Event()
+        messages = []
+        result = []
+
+        def write(message):
+            messages.append(message)
+            if message.get("method") == "elicitation/create":
+                form_open.set()
+
+        def telegram(_call, cancel_event):
+            self.assertTrue(form_open.wait(1))
+            self.assertTrue(send_answer.wait(2))
+            return [["보임"]]
+
+        def run():
+            result.append(runtime._answer_via_both_channels(self._call()))
+            messages.append({"method": "tool-result"})
+
+        with (mock.patch.object(mcp_server, "write_message", side_effect=write),
+              mock.patch.object(mcp_server, "_telegram_answers", side_effect=telegram)):
+            thread = threading.Thread(target=run)
+            thread.start()
+            self.assertTrue(form_open.wait(1))
+            self.assertFalse(any(item.get("method") == "notifications/cancelled" for item in messages))
+            self.assertTrue(thread.is_alive())
+            send_answer.set()
+            thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(result, [("telegram", [["보임"]])])
+        self.assertEqual([item["method"] for item in messages],
+                         ["elicitation/create", "notifications/cancelled", "tool-result"])
+        self.assertEqual(messages[1]["params"]["requestId"], messages[0]["id"])
+
     def test_unlimited_elicitation_accepts_a_response_after_the_old_maximum(self) -> None:
         runtime = mcp_server.McpRuntime()
         form = mcp_server._elicitation_form(self._call().questions, "session")
