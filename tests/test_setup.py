@@ -17,6 +17,15 @@ import setup  # noqa: E402
 
 
 class SetupTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Never let a main() test rewrite the developer's real Claude settings.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.claude_dir = Path(directory.name) / "claude"
+        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.claude_dir)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_manifest_only_advertises_supported_integrations(self) -> None:
         manifest = json.loads((ROOT / ".codex-plugin/plugin.json").read_text())
         self.assertNotIn("opencode", json.dumps(manifest).lower())

@@ -103,6 +103,16 @@ Add `--install-services` only when a systemd user-service restart is intended.
 New Hermes/Codex processes load the updated plugin; restart a live Hermes
 gateway only after confirming that interruption is acceptable.
 
+When `claude` is found on `PATH` (or `~/.claude`, or `$CLAUDE_CONFIG_DIR`,
+exists), setup and `--refresh` also merge this checkout's Claude Code hooks
+(`SessionStart`, `PermissionRequest`, `Stop`, `SessionEnd`) into
+`~/.claude/settings.json`. Only entries that run `scripts/claude_hook.py` are
+replaced; other settings and hooks are preserved, and an invalid settings file
+is left untouched with an error. Pass `--skip-claude` to leave Claude Code
+unchanged. To remove the integration, delete the hook entries whose command
+contains `scripts/claude_hook.py`. Settings changes apply to new Claude Code
+sessions; `/hooks` shows what an open session has loaded.
+
 `--refresh` preserves a supported receiver configuration; it does not repair
 missing credentials or migrate a retired receiver. If it reports an unsupported
 receiver, reconfigure with `--mode standalone --env-file /path/to/telegram.env`
@@ -256,7 +266,9 @@ Shared mode should leave `codex-telegram-poller.service` disabled because the
 external receiver owns polling. Standalone mode should leave the bundled
 poller enabled when user services are installed. Finally, start a new Codex
 process and confirm that the plugin, hooks, and `codex-telegram-mcp` launcher
-load from the current installation.
+load from the current installation. For Claude Code, start a new session, run
+`/hooks`, and confirm that the `PermissionRequest` hook runs
+`scripts/claude_hook.py` from this checkout.
 
 ## Security notes
 

@@ -20,6 +20,16 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 PLUGIN_ROOT = SCRIPT_DIR.parent
 HERMES_PLUGIN_NAME = "codex-telegram-bridge"
+CLAUDE_HOOK_SCRIPT = PLUGIN_ROOT / "scripts/claude_hook.py"
+CLAUDE_HOOK_MARKER = "scripts/claude_hook.py"
+# PermissionRequest waits for the first answer from Telegram or the terminal
+# dialog; ordinary questions have no time limit, so keep the hook alive.
+CLAUDE_HOOK_EVENTS: tuple[tuple[str, str, dict[str, Any]], ...] = (
+    ("SessionStart", "session-start", {"timeout": 15}),
+    ("PermissionRequest", "permission-request", {"timeout": 86400}),
+    ("Stop", "stop", {"timeout": 30, "async": True}),
+    ("SessionEnd", "session-end", {"timeout": 3}),
+)
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -132,6 +142,74 @@ def install_hermes() -> bool:
             _hermes_command(hermes, "config", "set", "security.approval.transport", "codex-telegram")
     else:
         print("Hermes approval transport is already customized; leaving it unchanged")
+    return True
+
+
+def claude_config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
+
+
+def _is_managed_claude_group(group: Any) -> bool:
+    hooks = group.get("hooks") if isinstance(group, dict) else None
+    return isinstance(hooks, list) and any(
+        isinstance(hook, dict) and CLAUDE_HOOK_MARKER in str(hook.get("command") or "")
+        for hook in hooks
+    )
+
+
+def claude_hook_settings(settings: dict[str, Any], python: str) -> dict[str, Any]:
+    """Return settings with this plugin's Claude hooks replaced idempotently."""
+
+    updated = dict(settings)
+    hooks = updated.get("hooks")
+    if hooks is None:
+        hooks = {}
+    if not isinstance(hooks, dict):
+        raise TelegramBridgeError("Claude settings 'hooks' must be an object")
+    hooks = dict(hooks)
+    for event, mode, options in CLAUDE_HOOK_EVENTS:
+        groups = hooks.get(event) or []
+        if not isinstance(groups, list):
+            raise TelegramBridgeError(f"Claude settings hooks.{event} must be an array")
+        kept = [group for group in groups if not _is_managed_claude_group(group)]
+        kept.append({
+            "hooks": [{
+                "type": "command",
+                "command": (
+                    f"{shlex.quote(python)} {shlex.quote(str(CLAUDE_HOOK_SCRIPT))} {mode}"
+                ),
+                **options,
+            }],
+        })
+        hooks[event] = kept
+    updated["hooks"] = hooks
+    return updated
+
+
+def install_claude() -> bool:
+    """Merge the Claude Code hooks into the user's settings when Claude is present."""
+
+    config_dir = claude_config_dir()
+    if not shutil.which("claude") and not config_dir.is_dir():
+        return False
+    path = config_dir / "settings.json"
+    if path.is_symlink():
+        raise TelegramBridgeError("Claude settings.json is a symlink; refusing to rewrite it")
+    current: Any = {}
+    if path.exists():
+        try:
+            current = json.loads(path.read_text(encoding="utf-8") or "{}")
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TelegramBridgeError("Claude settings.json is not valid JSON; fix it first") from exc
+    if not isinstance(current, dict):
+        raise TelegramBridgeError("Claude settings.json must contain a JSON object")
+    python = "/usr/bin/python3" if Path("/usr/bin/python3").is_file() else (
+        shutil.which("python3") or sys.executable
+    )
+    updated = claude_hook_settings(current, python)
+    if updated != current:
+        mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+        atomic_write_text(path, json.dumps(updated, ensure_ascii=False, indent=2) + "\n", mode)
     return True
 
 
@@ -327,6 +405,10 @@ def parse_args() -> argparse.Namespace:
         help="Call Telegram getMe after configuration.",
     )
     parser.add_argument(
+        "--skip-claude", action="store_true",
+        help="Do not install or refresh the Claude Code hooks.",
+    )
+    parser.add_argument(
         "--refresh", action="store_true",
         help="Reapply the existing receiver configuration and refresh Hermes integration.",
     )
@@ -378,6 +460,7 @@ def main() -> int:
         receiver=receiver,
     )
     hermes_enabled = install_hermes()
+    claude_enabled = False if args.skip_claude else install_claude()
     if args.install_services:
         install_services(mode, receiver)
     if args.test_connection:
@@ -385,6 +468,7 @@ def main() -> int:
     print(f"mode={mode}")
     print(f"receiver={receiver}")
     print(f"hermes_adapter={'enabled' if hermes_enabled else 'not-installed'}")
+    print(f"claude_hooks={'enabled' if claude_enabled else 'not-installed'}")
     print(f"settings={DEFAULT_SETTINGS_PATH}")
     print(f"credentials={env_path}")
     print("token_copied=not-applicable")

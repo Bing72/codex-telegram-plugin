@@ -33,6 +33,10 @@ port unless I explicitly ask. On updates, rerun `scripts/setup.py --refresh`
 - Session titles and question state mirrored into the active Codex session
 - `/sessions`, `/status N`, and `/start_work N` session control
 - Loopback-only session bridge backed by `codex app-server --stdio`
+- Claude Code hooks installed by `scripts/setup.py` when Claude Code is available:
+  native `AskUserQuestion` questions and permission dialogs appear in the
+  terminal and Telegram at the same time (first answer wins), plus labeled
+  completion notifications
 - Optional Hermes adapter installed by `scripts/setup.py` when Hermes is available:
   labeled completion/interruption notifications, a Telegram question tool, and
   a human approval transport using the same bot (no second polling consumer)
@@ -126,6 +130,54 @@ The original Markdown remains unchanged for the Codex TUI. A separate Telegram
 copy is converted deterministically to supported Telegram HTML and split at safe
 message boundaries without any additional LLM or model call.
 
+## Claude Code integration (when installed)
+
+`setup.py` merges four command hooks into `~/.claude/settings.json` (or
+`$CLAUDE_CONFIG_DIR/settings.json`) when Claude Code is available. They run
+`scripts/claude_hook.py` from this checkout and reuse the same credential
+reference and receiver; they never poll Telegram.
+
+Claude Code keeps its native dialog on screen while a `PermissionRequest` hook
+runs, and closes the dialog when the hook returns a decision. The hook uses
+this to give each dialog two channels:
+
+| Claude Code dialog | Terminal | Telegram |
+| --- | --- | --- |
+| `AskUserQuestion` (1–4 questions, single or multiple selection, free text) | Native question dialog | Inline buttons, `✏️ Custom answer`, and `✅ Done` for multiple selection |
+| Tool permissions (Bash, edits, web, MCP tools) | Native permission dialog | `이번만 허용`, `동일 요청 항상 허용`, `거부` |
+| Plan approval (`ExitPlanMode`) | Native plan dialog | Same approval buttons, with the plan text |
+
+- The first answer wins. A Telegram answer is returned to Claude Code as the
+  hook decision (questions become `AskUserQuestion` answers; multiple
+  selections are comma-joined), and the terminal dialog closes.
+- A terminal answer, rejection, or `Esc` is detected from the session
+  transcript (including subagent transcripts). The Telegram message is then
+  edited to show the result (for example `🖥️ 터미널에서 답변했습니다.`) and
+  its buttons are removed. If Claude Code interrupts the turn or exits, the
+  hook stops and retires its Telegram message too.
+- `동일 요청 항상 허용` applies Claude Code's own suggested permission rules for
+  the current session only. When Claude Code offers no suggestion, the plugin
+  remembers that exact request for the session.
+- Questions wait until answered (the hook timeout is one day). Permission
+  requests stop waiting on Telegram after the usual approval timeout; the
+  terminal dialog stays usable throughout. Telegram failures never block the
+  terminal dialog.
+- The plugin's own `mcp__codex-telegram__ask_user` tool is allowed without a
+  second approval prompt. In Claude Code it also works on both channels
+  through MCP form elicitation, but the SessionStart guidance tells Claude to
+  use native `AskUserQuestion` and not to send the same question twice.
+- `Stop` sends the final answer as `✅ Claude 완료 · <session title>`, using the
+  name set with `/rename` or Claude Code's generated title. Subagent stops are
+  not sent. This hook runs asynchronously so it does not delay the terminal.
+- The hook never writes raw text to the terminal, because that would corrupt
+  Claude Code's display; the native dialog is the terminal channel.
+
+Claude Code has no interrupt hook, so there is no Claude interruption alert.
+Questions Claude writes as plain text (not `AskUserQuestion`) reach Telegram
+only as part of the completion notification. Secure input and login flows
+remain terminal-only. Codex `/sessions`, `/status`, and `/start_work` remain
+Codex-only.
+
 ## Hermes integration (when installed)
 
 `setup.py` discovers `hermes` on `PATH`, installs the adapter in the active
@@ -186,7 +238,7 @@ Hermes dangerous-command approvals
 use its host-owned approval transport and preserve its allowed scopes and safety
 checks. Codex `/sessions`, `/status`, and `/start_work` remain Codex-only.
 
-For subsequent repository updates, refresh both integrations in one step:
+For subsequent repository updates, refresh every installed integration (Codex launcher, Hermes adapter, Claude Code hooks) in one step:
 
 ```bash
 python3 scripts/setup.py --refresh

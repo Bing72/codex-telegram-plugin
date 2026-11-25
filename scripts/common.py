@@ -27,7 +27,7 @@ import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 
 DEFAULT_PLUGIN_CONFIG_DIR = Path.home() / ".config/codex-telegram-plugin"
@@ -1201,7 +1201,7 @@ def ask_questions(
     session_name: str | None = None,
     agent_name: str = "Codex",
     cancel_event: threading.Event | None = None,
-    cancel_message: str = "✅ Codex에서 답변을 받았습니다.",
+    cancel_message: str | Callable[[], str] = "✅ Codex에서 답변을 받았습니다.",
 ) -> list[list[str]] | None:
     cfg = config or load_telegram_config()
     normalized = normalize_questions(questions)
@@ -1256,11 +1256,12 @@ def ask_questions(
     try:
         while deadline is None or time.monotonic() < deadline:
             if cancel_event is not None and cancel_event.is_set():
+                closing = cancel_message() if callable(cancel_message) else cancel_message
                 try:
                     edit_message(
                         cfg,
                         message_id,
-                        f"🧵 세션: {display_session_name}\n\n{cancel_message}",
+                        f"🧵 세션: {display_session_name}\n\n{closing}",
                     )
                 except TelegramBridgeError:
                     pass
@@ -1385,6 +1386,9 @@ def request_permission(
     cancel_event: threading.Event | None = None,
     allow_always: bool = True,
     allow_once: bool = True,
+    agent_name: str = "Codex",
+    session_name: str | None = None,
+    cancel_message: str | Callable[[], str] | None = None,
 ) -> str:
     if cancel_event is not None and cancel_event.is_set():
         raise TelegramBridgeError("Permission request cancelled")
@@ -1394,10 +1398,11 @@ def request_permission(
     host, port = server.server_address
     server_url = f"http://{host}:{port}/"
     short_hash = permission_short_hash(request_id, session_id, "request", server_url)
+    session_line = f"🧵 세션: {session_name}" if session_name else f"세션: {session_id}"
     detail_lines = [
-        "❓ [Codex] 권한 요청",
+        f"❓ [{agent_name}] 권한 요청",
         "",
-        f"세션: {session_id}",
+        session_line,
         f"권한: {permission}",
         f"내용: {title}",
     ]
@@ -1429,7 +1434,7 @@ def request_permission(
         },
     )
     terminal_details = [
-        f"세션: {session_id}",
+        session_line,
         f"권한: {permission}",
         f"내용: {title}",
     ]
@@ -1440,7 +1445,7 @@ def request_permission(
     mirror_terminal_event(
         "권한 요청",
         short_hash,
-        "Codex 실행 승인을 기다립니다.",
+        f"{agent_name} 실행 승인을 기다립니다.",
         terminal_details,
         state="Telegram과 현재 터미널에 표시됨 · Telegram 결정 대기",
     )
@@ -1450,8 +1455,12 @@ def request_permission(
         deadline = time.monotonic() + timeout_seconds
         while True:
             if cancel_event is not None and cancel_event.is_set():
+                closing = (
+                    cancel_message() if callable(cancel_message)
+                    else cancel_message or f"{agent_name} 권한 요청이 종료되었습니다."
+                )
                 try:
-                    edit_message(cfg, message_id, "Codex 권한 요청이 종료되었습니다.")
+                    edit_message(cfg, message_id, closing)
                 except TelegramBridgeError:
                     pass
                 raise TelegramBridgeError("Permission request cancelled")
@@ -1471,21 +1480,21 @@ def request_permission(
         mirror_terminal_event(
             "권한 요청",
             short_hash,
-            "Telegram 권한 결정을 Codex에 전달했습니다.",
+            f"Telegram 권한 결정을 {agent_name}에 전달했습니다.",
             [f"결정: {label}"],
             state="응답 완료",
         )
         return reply
     except queue.Empty as exc:
         try:
-            edit_message(cfg, message_id, "⌛ Codex 권한 요청이 만료됐습니다.")
+            edit_message(cfg, message_id, f"⌛ {agent_name} 권한 요청이 만료됐습니다.")
         except TelegramBridgeError:
             pass
         mirror_terminal_event(
             "권한 요청",
             short_hash,
             "권한 결정을 받지 못했습니다.",
-            state="만료 · Codex 네이티브 승인 흐름으로 복귀",
+            state=f"만료 · {agent_name} 네이티브 승인 흐름으로 복귀",
         )
         raise TimeoutError("Telegram permission timed out") from exc
     finally:
