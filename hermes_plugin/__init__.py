@@ -116,6 +116,10 @@ class HermesTelegramAdapter:
                 self._seen.pop()
         if not self._local(platform) or (platform == "subagent" and not interrupted):
             return
+        # Whole-response control tokens are not user-facing completion text.
+        # Keep reports mentioning a token and interruption alerts deliverable.
+        if not interrupted and " ".join(response.upper().split()) in {"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY", "[静默]", "静默", "[沉默]", "沉默"}:
+            return
         try:
             common = _bridge_common()
             marker = common.session_emoji(session_id)

@@ -361,6 +361,37 @@ class HermesPluginTests(unittest.TestCase):
         self.assertIn("Hermes 완료", sent[0][1])
         self.assertIn("Hermes 중단", sent[1][1])
 
+    def test_silent_completion_does_not_notify(self) -> None:
+        plugin = load_plugin()
+        for response in ("[SILENT]", " \n[silent]\n ", "NO_REPLY"):
+            with self.subTest(response=response):
+                sent = mock.Mock()
+                adapter = plugin.HermesTelegramAdapter(send=sent)
+                adapter.on_response(session_id="s", turn_id="t", assistant_response=response, platform="cli")
+                adapter.on_end(session_id="s", turn_id="t", completed=True, platform="cli")
+                adapter.on_end(session_id="s", turn_id="t", completed=True, platform="cli")
+                sent.assert_not_called()
+                self.assertEqual(adapter._pending, {})
+
+    def test_report_mentioning_silence_marker_still_notifies(self) -> None:
+        plugin = load_plugin()
+        sent = mock.Mock()
+        adapter = plugin.HermesTelegramAdapter(send=sent)
+        response = "[SILENT] 표시가 전송되지 않도록 수정했습니다."
+        adapter.on_response(session_id="s", turn_id="t", assistant_response=response, platform="cli")
+        adapter.on_end(session_id="s", turn_id="t", completed=True, platform="cli")
+        sent.assert_called_once()
+        self.assertEqual(sent.call_args.args[0], response)
+
+    def test_silent_response_does_not_hide_interruption(self) -> None:
+        plugin = load_plugin()
+        sent = mock.Mock()
+        adapter = plugin.HermesTelegramAdapter(send=sent)
+        adapter.on_response(session_id="s", turn_id="t", assistant_response="[SILENT]", platform="cli")
+        adapter.on_end(session_id="s", turn_id="t", interrupted=True, platform="cli")
+        sent.assert_called_once()
+        self.assertIn("Hermes 중단", sent.call_args.args[1])
+
     def test_subagent_completion_does_not_notify_or_buffer_response(self) -> None:
         plugin = load_plugin()
         sent = mock.Mock()
